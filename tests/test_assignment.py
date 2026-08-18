@@ -6,8 +6,9 @@ from unittest import TestCase
 import pytest
 import torch
 from scipy.optimize import linear_sum_assignment
-from torch_linear_assignment import batch_linear_assignment
+
 import torch_linear_assignment.assignment as assignment_module
+from torch_linear_assignment import batch_linear_assignment
 
 
 def scipy_assignment(cost):
@@ -49,9 +50,7 @@ def scipy_assignment(cost):
             id="evolving-scan-order-ties",
         ),
         pytest.param(
-            torch.tensor(
-                [[[-4.0, -1.0, -3.0], [-2.0, -5.0, -6.0], [-7.0, -8.0, -9.0]]]
-            ),
+            torch.tensor([[[-4.0, -1.0, -3.0], [-2.0, -5.0, -6.0], [-7.0, -8.0, -9.0]]]),
             id="negative-costs",
         ),
         pytest.param(
@@ -72,9 +71,7 @@ def test_batch_linear_assignment_cpu_matches_scipy_deterministic_costs(cost):
 
 def test_batch_linear_assignment_cpu_matches_scipy_for_non_contiguous_cost():
     """Prevent a CPU solver from assuming a contiguous cost layout."""
-    cost = torch.tensor(
-        [[[9.0, 5.0, 1.0], [4.0, 8.0, 3.0], [7.0, 2.0, 6.0], [0.0, 10.0, 11.0]]]
-    ).transpose(1, 2)
+    cost = torch.tensor([[[9.0, 5.0, 1.0], [4.0, 8.0, 3.0], [7.0, 2.0, 6.0], [0.0, 10.0, 11.0]]]).transpose(1, 2)
     assert not cost.is_contiguous()
     expected = scipy_assignment(cost)
 
@@ -113,9 +110,7 @@ def test_batch_linear_assignment_empty_batch_preserves_worker_dimension():
         ),
     ],
 )
-def test_batch_linear_assignment_cpu_handles_scipy_permitted_zero_dimensions(
-    cost, expected
-):
+def test_batch_linear_assignment_cpu_handles_scipy_permitted_zero_dimensions(cost, expected):
     """Pin SciPy-permitted zero-dimension assignment results."""
     actual = batch_linear_assignment(cost)
 
@@ -126,9 +121,7 @@ def test_batch_linear_assignment_rejects_non_batched_cost():
     """Prevent rank-two costs from silently being treated as a batch."""
     cost = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
 
-    with pytest.raises(
-        ValueError, match="Need 3-dimensional tensor with shape \\(B, W, T\\)\\."
-    ):
+    with pytest.raises(ValueError, match="Need 3-dimensional tensor with shape \\(B, W, T\\)\\."):
         batch_linear_assignment(cost)
 
 
@@ -157,9 +150,7 @@ def test_batch_linear_assignment_rejects_non_batched_cost():
         ),
     ],
 )
-def test_batch_linear_assignment_cpu_matches_scipy_non_finite_contract(
-    cost, error_message
-):
+def test_batch_linear_assignment_cpu_matches_scipy_non_finite_contract(cost, error_message):
     """Prevent CPU non-finite handling from diverging from SciPy semantics."""
     if error_message is not None:
         with pytest.raises(ValueError, match=error_message):
@@ -272,11 +263,7 @@ class TestAssignment(TestCase):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def test_simple(self):
-        cost = (
-            torch.tensor([8, 4, 7, 5, 2, 3, 9, 6, 7, 9, 4, 8])
-            .reshape(1, 4, 3)
-            .to(self.device)
-        )
+        cost = torch.tensor([8, 4, 7, 5, 2, 3, 9, 6, 7, 9, 4, 8]).reshape(1, 4, 3).to(self.device)
         gt_assignment = torch.tensor([0, 2, -1, 1]).reshape(1, 4)
         result = batch_linear_assignment(cost).cpu()
         print(result)

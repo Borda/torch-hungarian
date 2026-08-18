@@ -13,7 +13,6 @@ import pytest
 import torch
 from scipy.optimize import linear_sum_assignment
 
-
 _MINIMUM_TORCH_VERSION = (2, 4)
 
 
@@ -41,9 +40,7 @@ def _compiled_device_params():
     """Parametrize every supported CUDA device or report the exact ineligibility."""
     reason = _compiled_triton_skip_reason()
     if reason is not None:
-        return [
-            pytest.param(None, marks=pytest.mark.skip(reason=reason), id="ineligible")
-        ]
+        return [pytest.param(None, marks=pytest.mark.skip(reason=reason), id="ineligible")]
 
     params: list[pytest.ParameterSet] = []
     for device_index in range(torch.cuda.device_count()):
@@ -89,9 +86,7 @@ def _scipy_assignment(cost: torch.Tensor) -> torch.Tensor:
     expected = torch.full((batch_size, workers), -1, dtype=torch.long)
     for batch_index, matrix in enumerate(cpu_cost):
         row_indices, column_indices = linear_sum_assignment(matrix.numpy())
-        expected[batch_index, torch.from_numpy(row_indices)] = torch.from_numpy(
-            column_indices
-        )
+        expected[batch_index, torch.from_numpy(row_indices)] = torch.from_numpy(column_indices)
     return expected
 
 
@@ -121,9 +116,7 @@ def _scipy_assignment(cost: torch.Tensor) -> torch.Tensor:
             id="evolving-scan-order-ties",
         ),
         pytest.param(
-            torch.tensor(
-                [[[-4.0, -1.0, -3.0], [-2.0, -5.0, -6.0], [-7.0, -8.0, -9.0]]]
-            ),
+            torch.tensor([[[-4.0, -1.0, -3.0], [-2.0, -5.0, -6.0], [-7.0, -8.0, -9.0]]]),
             id="negative-costs",
         ),
     ],
@@ -190,9 +183,7 @@ def test_batch_linear_assignment_compiled_handles_non_contiguous_cost(
     """Prevent the wrapper or kernel from treating a strided input as contiguous."""
     backend, device = triton_backend_device
     cost = (
-        torch.tensor(
-            [[[9.0, 5.0, 1.0], [4.0, 8.0, 3.0], [7.0, 2.0, 6.0], [0.0, 10.0, 11.0]]]
-        )
+        torch.tensor([[[9.0, 5.0, 1.0], [4.0, 8.0, 3.0], [7.0, 2.0, 6.0], [0.0, 10.0, 11.0]]])
         .transpose(1, 2)
         .to(device)
     )
@@ -344,9 +335,7 @@ def test_batch_linear_assignment_compiled_obeys_non_default_stream(
 ) -> None:
     """Prevent workspace allocation or validation from assuming the default stream."""
     backend, device = triton_backend_device
-    cost = torch.tensor(
-        [[[4.0, 1.0, 3.0], [2.0, 0.0, 5.0], [3.0, 2.0, 2.0]]], device=device
-    )
+    cost = torch.tensor([[[4.0, 1.0, 3.0], [2.0, 0.0, 5.0], [3.0, 2.0, 2.0]]], device=device)
     expected = _scipy_assignment(cost)
     stream = torch.cuda.Stream(device=device)
 

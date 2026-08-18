@@ -43,11 +43,8 @@ import torch
 import triton
 import triton.language as tl
 
-
 ValidationMode = Literal["full", "off", "nonfinite_only", "infeasibility_flag_only"]
-_VALIDATION_MODES: frozenset[str] = frozenset(
-    {"full", "off", "nonfinite_only", "infeasibility_flag_only"}
-)
+_VALIDATION_MODES: frozenset[str] = frozenset({"full", "off", "nonfinite_only", "infeasibility_flag_only"})
 
 
 @triton.jit
@@ -176,18 +173,12 @@ def _linear_assignment_kernel(
             mask=update_row,
         )
 
-        visited_columns = (
-            tl.load(scanned_columns + lane, mask=column_mask, other=0) != 0
-        )
+        visited_columns = tl.load(scanned_columns + lane, mask=column_mask, other=0) != 0
         update_column = solved & column_mask & visited_columns
-        column_shortest = tl.load(
-            shortest_path_costs + lane, mask=column_mask, other=0.0
-        )
+        column_shortest = tl.load(shortest_path_costs + lane, mask=column_mask, other=0.0)
         tl.store(
             v + lane,
-            tl.load(v + lane, mask=column_mask, other=0.0)
-            - min_value
-            + column_shortest,
+            tl.load(v + lane, mask=column_mask, other=0.0) - min_value + column_shortest,
             mask=update_column,
         )
 
@@ -232,9 +223,7 @@ def _empty_assignment(cost: torch.Tensor) -> torch.Tensor:
     return torch.full((batch_size, workers), -1, dtype=torch.long, device=cost.device)
 
 
-def _solve(
-    cost: torch.Tensor, validation: ValidationMode
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch the one-program-per-batch kernel and return both assignment views."""
     batch_size, rows, columns = cost.shape
     block_n = triton.next_power_of_2(columns)
@@ -269,9 +258,7 @@ def _solve(
         BLOCK_N=block_n,
         num_warps=4,
     )
-    if validation in {"full", "infeasibility_flag_only"} and bool(
-        infeasible.any().item()
-    ):
+    if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.any().item()):
         raise ValueError("cost matrix is infeasible")
     return col4row, row4col
 
