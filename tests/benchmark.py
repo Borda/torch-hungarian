@@ -26,7 +26,6 @@ from torch_linear_assignment.assignment import (
     batch_linear_assignment_cpu,
 )
 
-
 _DTYPES = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
@@ -141,11 +140,7 @@ def _backend_callable(
     if backend == "scipy":
         return lambda cost: _scipy_oracle(cost.cpu())
     if backend == "legacy_cuda":
-        return (
-            _batch_linear_assignment_cuda_legacy
-            if _load_legacy_backend() is not None
-            else None
-        )
+        return _batch_linear_assignment_cuda_legacy if _load_legacy_backend() is not None else None
 
     triton_backend = _load_triton_backend()
     if triton_backend is None:
@@ -230,13 +225,7 @@ def _case_record(
             "batch": batch,
             "workers": workers,
             "tasks": tasks,
-            "orientation": (
-                "transpose"
-                if tasks < workers
-                else "square"
-                if tasks == workers
-                else "direct"
-            ),
+            "orientation": ("transpose" if tasks < workers else "square" if tasks == workers else "direct"),
         },
         "input_dtype": dtype_name,
         "solver_dtype": _solver_dtype_name(dtype),
@@ -251,11 +240,7 @@ def _case_record(
 
     benchmark_cost = cpu_cost if backend == "scipy" else cpu_cost.cuda()
     torch.cuda.reset_peak_memory_stats() if benchmark_cost.is_cuda else None
-    memory_before = (
-        torch.cuda.memory_allocated(benchmark_cost.device)
-        if benchmark_cost.is_cuda
-        else 0
-    )
+    memory_before = torch.cuda.memory_allocated(benchmark_cost.device) if benchmark_cost.is_cuda else 0
     cold_ms, result = _time_call(operation, benchmark_cost)
     if not torch.equal(result.cpu(), oracle):
         return {
@@ -272,9 +257,7 @@ def _case_record(
 
     samples = [_time_call(operation, benchmark_cost)[0] for _ in range(repetitions)]
     peak_delta = (
-        torch.cuda.max_memory_allocated(benchmark_cost.device) - memory_before
-        if benchmark_cost.is_cuda
-        else None
+        torch.cuda.max_memory_allocated(benchmark_cost.device) - memory_before if benchmark_cost.is_cuda else None
     )
     return {
         **base,

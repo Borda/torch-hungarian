@@ -2,7 +2,8 @@ from unittest import TestCase
 
 import torch
 from scipy.optimize import linear_sum_assignment
-from torch_linear_assignment import batch_linear_assignment, assignment_to_indices
+
+from torch_linear_assignment import assignment_to_indices, batch_linear_assignment
 
 
 class TestAssignmentToIndices(TestCase):

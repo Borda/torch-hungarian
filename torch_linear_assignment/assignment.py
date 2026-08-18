@@ -9,7 +9,6 @@ from types import ModuleType
 import torch
 from scipy.optimize import linear_sum_assignment
 
-
 _CUDA_FALLBACK_WARNING_EMITTED = False
 _TRITON_MINIMUM_TORCH_VERSION = (2, 4)
 
@@ -25,13 +24,9 @@ def batch_linear_assignment_cpu(cost: torch.Tensor) -> torch.Tensor:
     """Solve batched assignment with SciPy on the cost tensor's CPU device."""
     cost = _prepare_solver_cost(cost)
     batch_size, workers, _ = cost.shape
-    matching = torch.full(
-        [batch_size, workers], -1, dtype=torch.long, device=cost.device
-    )
+    matching = torch.full([batch_size, workers], -1, dtype=torch.long, device=cost.device)
     for batch_index in range(batch_size):
-        row_indices, column_indices = linear_sum_assignment(
-            cost[batch_index].numpy(), maximize=False
-        )
+        row_indices, column_indices = linear_sum_assignment(cost[batch_index].numpy(), maximize=False)
         matching[batch_index].scatter_(
             0,
             torch.from_numpy(row_indices),
@@ -43,10 +38,7 @@ def batch_linear_assignment_cpu(cost: torch.Tensor) -> torch.Tensor:
 def _torch_supports_triton() -> bool:
     """Return whether the installed Torch version meets the Triton-path floor."""
     version = re.match(r"(\d+)\.(\d+)", torch.__version__)
-    return (
-        version is not None
-        and tuple(map(int, version.groups())) >= _TRITON_MINIMUM_TORCH_VERSION
-    )
+    return version is not None and tuple(map(int, version.groups())) >= _TRITON_MINIMUM_TORCH_VERSION
 
 
 def _load_triton_backend() -> ModuleType | None:
@@ -78,10 +70,7 @@ def _cuda_uses_triton(cost: torch.Tensor) -> bool:
         or torch.version.cuda is None
     ):
         return False
-    return (
-        torch.cuda.get_device_capability(cost.device) >= (8, 0)
-        and _load_triton_backend() is not None
-    )
+    return torch.cuda.get_device_capability(cost.device) >= (8, 0) and _load_triton_backend() is not None
 
 
 def _warn_cuda_fallback() -> None:
