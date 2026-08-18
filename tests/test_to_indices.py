@@ -1,4 +1,4 @@
-from unittest import TestCase, main
+from unittest import TestCase
 
 import torch
 from scipy.optimize import linear_sum_assignment
@@ -7,7 +7,13 @@ from torch_linear_assignment import batch_linear_assignment, assignment_to_indic
 
 class TestAssignmentToIndices(TestCase):
     def test_compare_to_scipy(self):
-        for shape in [(0, 10, 10), (1, 20, 100), (1, 100, 20), (5, 20, 100), (5, 100, 20)]:
+        for shape in [
+            (0, 10, 10),
+            (1, 20, 100),
+            (1, 100, 20),
+            (5, 20, 100),
+            (5, 100, 20),
+        ]:
             cost = torch.randn(*shape)
             assignment = batch_linear_assignment(cost)
             row_ind, col_ind = assignment_to_indices(assignment)
@@ -26,4 +32,3 @@ class TestAssignmentToIndices(TestCase):
             self.assertEqual(col_ind.shape, gt_col_ind.shape)
             self.assertTrue((row_ind == gt_row_ind).all())
             self.assertTrue((col_ind == gt_col_ind).all())
-
