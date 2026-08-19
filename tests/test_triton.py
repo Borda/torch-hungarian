@@ -165,13 +165,28 @@ def test_batch_linear_assignment_compiled_preserves_empty_contract(
 def test_batch_linear_assignment_compiled_matches_seeded_batched_oracle(
     triton_backend_device: tuple[object, torch.device],
 ) -> None:
-    """Prevent workspace offsets from leaking one seeded batch item into another."""
+    """Prevent one seeded batch item from changing another item's assignment."""
     backend, device = triton_backend_device
     generator = torch.Generator().manual_seed(32)
     cost = torch.rand((7, 4, 6), generator=generator).to(device)
     expected = _scipy_assignment(cost)
 
     actual = backend.batch_linear_assignment(cost)
+
+    assert actual.dtype == torch.long
+    assert torch.equal(actual.cpu(), expected)
+
+
+def test_batch_linear_assignment_compiled_matches_large_batched_oracle(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Prevent large-vector execution failures exposed by saved batch-624 GPU runs."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(32)
+    cost = torch.randn((624, 300, 300), generator=generator)
+    expected = _scipy_assignment(cost)
+
+    actual = backend.batch_linear_assignment(cost.to(device))
 
     assert actual.dtype == torch.long
     assert torch.equal(actual.cpu(), expected)

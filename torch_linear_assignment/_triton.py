@@ -9,8 +9,11 @@ Purpose:
 Scope:
     One Triton program solves one batch item. The program is intentionally
     correctness-first: outer augmenting-path steps remain sequential while each
-    current set of candidate columns is processed as a masked lane vector. Its
-    ordering reproduces the legacy CUDA and SciPy rectangular-LSAP algorithm.
+    current set of candidate columns is processed as a masked lane vector.
+    Per-search state remains program-local. The correctness launch currently
+    keeps its loop-carried vectors within one warp; wider launch configurations
+    remain gated on exact GPU parity. Its ordering reproduces the legacy CUDA
+    and SciPy rectangular-LSAP algorithm.
 
 Usage:
     ``batch_linear_assignment(cuda_cost)`` accepts a three-dimensional CUDA
@@ -52,17 +55,13 @@ def _linear_assignment_kernel(
     cost,
     u,
     v,
-    shortest_path_costs,
-    path,
     col4row,
     row4col,
-    scanned_rows,
-    scanned_columns,
-    remaining,
     infeasible,
     NUM_ROWS: tl.constexpr,
     NUM_COLUMNS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    IS_FP64: tl.constexpr,
 ):
     """Solve one rectangular assignment problem in a single Triton program."""
     batch_index = tl.program_id(0)
@@ -73,21 +72,21 @@ def _linear_assignment_kernel(
     cost = cost + batch_index * NUM_ROWS * NUM_COLUMNS
     u = u + batch_index * NUM_ROWS
     v = v + batch_index * NUM_COLUMNS
-    shortest_path_costs = shortest_path_costs + batch_index * NUM_COLUMNS
-    path = path + batch_index * NUM_COLUMNS
     col4row = col4row + batch_index * NUM_ROWS
     row4col = row4col + batch_index * NUM_COLUMNS
-    scanned_rows = scanned_rows + batch_index * NUM_ROWS
-    scanned_columns = scanned_columns + batch_index * NUM_COLUMNS
-    remaining = remaining + batch_index * NUM_COLUMNS
 
     for current_row in tl.range(0, NUM_ROWS, num_stages=1):
-        tl.store(scanned_rows + lane, 0, mask=row_mask)
-        tl.store(scanned_columns + lane, 0, mask=column_mask)
-        tl.store(remaining + lane, NUM_COLUMNS - lane - 1, mask=column_mask)
-        tl.store(shortest_path_costs + lane, float("inf"), mask=column_mask)
-        # Later lanes dereference the initialized scan-order workspaces.
-        tl.debug_barrier()
+        scanned_rows = tl.zeros((BLOCK_N,), tl.int1)
+        scanned_columns = tl.zeros((BLOCK_N,), tl.int1)
+        active_columns = column_mask
+        scan_positions = NUM_COLUMNS - lane - 1
+        path = tl.full((BLOCK_N,), -1, tl.int32)
+        if IS_FP64:
+            shortest_path_costs = tl.full((BLOCK_N,), float("inf"), tl.float64)
+            scanned_row_costs = tl.zeros((BLOCK_N,), tl.float64)
+        else:
+            shortest_path_costs = tl.full((BLOCK_N,), float("inf"), tl.float32)
+            scanned_row_costs = tl.zeros((BLOCK_N,), tl.float32)
 
         sink = -1
         current_potential = tl.load(u + current_row)
@@ -98,32 +97,27 @@ def _linear_assignment_kernel(
 
         for _ in tl.range(0, NUM_COLUMNS, num_stages=1):
             searching = sink == -1
-            tl.store(scanned_rows + search_row, 1, mask=searching)
-            candidate_mask = column_mask & (lane < num_remaining) & searching
-            columns = tl.load(remaining + lane, mask=column_mask, other=0)
-            previous_cost = tl.load(
-                shortest_path_costs + columns,
-                mask=candidate_mask,
-                other=float("inf"),
-            )
+            scanned_rows = scanned_rows | (row_mask & (lane == search_row) & searching)
+            candidate_mask = active_columns & searching
+            previous_cost = shortest_path_costs
             reduced_cost = (
                 min_value
                 - tl.load(u + search_row)
                 + tl.load(
-                    cost + search_row * NUM_COLUMNS + columns,
+                    cost + search_row * NUM_COLUMNS + lane,
                     mask=candidate_mask,
                     other=float("inf"),
                 )
-                - tl.load(v + columns, mask=candidate_mask, other=0.0)
+                - tl.load(v + lane, mask=candidate_mask, other=0.0)
             )
             improved = candidate_mask & (reduced_cost < previous_cost)
             candidate_cost = tl.where(improved, reduced_cost, previous_cost)
-            tl.store(shortest_path_costs + columns, candidate_cost, mask=candidate_mask)
-            tl.store(path + columns, search_row, mask=improved)
+            shortest_path_costs = candidate_cost
+            path = tl.where(improved, search_row, path)
 
-            # ``remaining`` is scan order, not column order. Among equal minima,
-            # the original solver selects the last unmatched lane, otherwise the
-            # first tied lane; swap-removal below preserves that evolving order.
+            # The legacy solver scans a swap-removed ``remaining`` array. Track
+            # each column's current scan position locally to preserve its exact
+            # last-unmatched/first-matched tie rule without shared scratch writes.
             lowest = tl.min(
                 tl.where(candidate_mask, candidate_cost, float("inf")),
                 axis=0,
@@ -131,59 +125,74 @@ def _linear_assignment_kernel(
             has_candidate = lowest != float("inf")
             step_valid = searching & has_candidate
             tied = candidate_mask & (candidate_cost == lowest)
-            matched_rows = tl.load(row4col + columns, mask=candidate_mask, other=0)
-            last_unmatched = tl.max(
-                tl.where(tied & (matched_rows == -1), lane, -1),
+            matched_rows = tl.load(row4col + lane, mask=candidate_mask, other=0)
+            last_unmatched_position = tl.max(
+                tl.where(tied & (matched_rows == -1), scan_positions, -1),
                 axis=0,
             )
-            first_tied = tl.min(
-                tl.where(tied, lane, NUM_COLUMNS),
+            first_tied_position = tl.min(
+                tl.where(tied, scan_positions, NUM_COLUMNS),
                 axis=0,
             )
-            selected_index = tl.where(last_unmatched >= 0, last_unmatched, first_tied)
-            safe_selected_index = tl.where(step_valid, selected_index, 0)
-            selected_column = tl.load(remaining + safe_selected_index)
+            selected_position = tl.where(
+                last_unmatched_position >= 0,
+                last_unmatched_position,
+                first_tied_position,
+            )
+            selected_column = tl.max(
+                tl.where(candidate_mask & (scan_positions == selected_position), lane, -1),
+                axis=0,
+            )
+            selected_column = tl.where(step_valid, selected_column, 0)
             selected_row = tl.load(row4col + selected_column)
 
+            # A matched row enters the search tree through ``selected_column``.
+            # Save that column's shortest cost by row now, avoiding a dynamic
+            # gather from the loop-carried column vector after the search.
+            matched_step = step_valid & (selected_row != -1)
+            scanned_row_costs = tl.where(
+                row_mask & (lane == selected_row) & matched_step,
+                lowest,
+                scanned_row_costs,
+            )
             sink = tl.where(step_valid & (selected_row == -1), selected_column, sink)
             search_row = tl.where(
-                step_valid & (selected_row != -1),
+                matched_step,
                 selected_row,
                 search_row,
             )
-            tl.store(scanned_columns + selected_column, 1, mask=step_valid)
+            scanned_columns = scanned_columns | (column_mask & (lane == selected_column) & step_valid)
             last_index = num_remaining - 1
-            last_column = tl.load(
-                remaining + tl.where(step_valid, last_index, 0),
+            last_column = tl.max(
+                tl.where(active_columns & (scan_positions == last_index), lane, -1),
+                axis=0,
             )
-            tl.store(remaining + safe_selected_index, last_column, mask=step_valid)
+            scan_positions = tl.where(
+                active_columns & (lane == last_column) & step_valid,
+                selected_position,
+                scan_positions,
+            )
+            active_columns = active_columns & ~((lane == selected_column) & step_valid)
             num_remaining = tl.where(step_valid, num_remaining - 1, num_remaining)
             min_value = tl.where(step_valid, lowest, min_value)
             tl.store(infeasible + batch_index, 1, mask=searching & ~has_candidate)
-            # Swap-removal changes which lane reads each workspace entry next.
-            tl.debug_barrier()
 
         solved = sink != -1
         tl.store(infeasible + batch_index, 1, mask=~solved)
 
         tl.store(u + current_row, current_potential + min_value, mask=solved)
-        visited_rows = tl.load(scanned_rows + lane, mask=row_mask, other=0) != 0
-        assigned_columns = tl.load(col4row + lane, mask=row_mask, other=0)
+        visited_rows = scanned_rows
         update_row = solved & row_mask & visited_rows & (lane != current_row)
-        safe_assigned_column = tl.where(update_row, assigned_columns, 0)
-        row_shortest = tl.load(shortest_path_costs + safe_assigned_column)
         tl.store(
             u + lane,
-            tl.load(u + lane, mask=row_mask, other=0.0) + min_value - row_shortest,
+            tl.load(u + lane, mask=row_mask, other=0.0) + min_value - scanned_row_costs,
             mask=update_row,
         )
 
-        visited_columns = tl.load(scanned_columns + lane, mask=column_mask, other=0) != 0
-        update_column = solved & column_mask & visited_columns
-        column_shortest = tl.load(shortest_path_costs + lane, mask=column_mask, other=0.0)
+        update_column = solved & column_mask & scanned_columns
         tl.store(
             v + lane,
-            tl.load(v + lane, mask=column_mask, other=0.0) - min_value + column_shortest,
+            tl.load(v + lane, mask=column_mask, other=0.0) - min_value + shortest_path_costs,
             mask=update_column,
         )
 
@@ -191,7 +200,10 @@ def _linear_assignment_kernel(
         augmenting_column = sink
         for _ in tl.range(0, NUM_ROWS, num_stages=1):
             safe_column = tl.where(augmenting, augmenting_column, 0)
-            augmenting_row = tl.load(path + safe_column)
+            augmenting_row = tl.max(
+                tl.where(column_mask & (lane == safe_column), path, -1),
+                axis=0,
+            )
             safe_row = tl.where(augmenting, augmenting_row, 0)
             previous_column = tl.load(col4row + safe_row)
             tl.store(row4col + safe_column, augmenting_row, mask=augmenting)
@@ -240,31 +252,24 @@ def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor
     integer_options = {**workspace_options, "dtype": torch.int32}
     u = torch.zeros((batch_size, rows), **scalar_options)
     v = torch.zeros((batch_size, columns), **scalar_options)
-    shortest_path_costs = torch.empty((batch_size, columns), **scalar_options)
-    path = torch.full((batch_size, columns), -1, **integer_options)
     col4row = torch.full((batch_size, rows), -1, **integer_options)
     row4col = torch.full((batch_size, columns), -1, **integer_options)
-    scanned_rows = torch.empty((batch_size, rows), **integer_options)
-    scanned_columns = torch.empty((batch_size, columns), **integer_options)
-    remaining = torch.empty((batch_size, columns), **integer_options)
     infeasible = torch.zeros((batch_size,), **integer_options)
 
     _linear_assignment_kernel[(batch_size,)](
         cost,
         u,
         v,
-        shortest_path_costs,
-        path,
         col4row,
         row4col,
-        scanned_rows,
-        scanned_columns,
-        remaining,
         infeasible,
         NUM_ROWS=rows,
         NUM_COLUMNS=columns,
         BLOCK_N=block_n,
-        num_warps=4,
+        IS_FP64=cost.dtype == torch.float64,
+        # Multi-warp loop-carried state produces false infeasibility on the
+        # saved 512-lane L4 case; keep one warp until a wider design is exact.
+        num_warps=1,
     )
     if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.any().item()):
         raise ValueError("cost matrix is infeasible")

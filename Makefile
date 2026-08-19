@@ -29,7 +29,7 @@ test: install-dev
 	$(PYTHON) -m pytest tests/ -v
 
 benchmark:
-	$(PYTHON) tests/benchmark.py
+	env -u CUDA_LAUNCH_BLOCKING $(PYTHON) tests/benchmark.py
 
 validate-cpu: test
 
@@ -46,6 +46,7 @@ validate-gpu: test
 	$(PYTHON) -c "import importlib.metadata as m, importlib.util as u; print('Triton:', m.version('triton') if u.find_spec('triton') else 'unavailable')"; \
 	$(PYTHON) -c "import torch; p = torch.cuda.get_device_properties(0); print(f'GPU: {p.name} sm_{p.major}{p.minor} | torch {torch.__version__} | cuda {torch.version.cuda}')"
 
+validate: export CUDA_LAUNCH_BLOCKING := 1
 validate: validate-cpu validate-gpu
 
 clean:
