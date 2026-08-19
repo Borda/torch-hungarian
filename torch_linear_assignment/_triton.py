@@ -201,7 +201,9 @@ def _linear_assignment_kernel(
 
         augmenting = solved
         augmenting_column = sink
-        for _ in tl.range(0, NUM_ROWS, num_stages=1):
+        augmentation_steps = 0
+        # Recover only the actual path while retaining the row-count safety cap.
+        while augmenting & (augmentation_steps < NUM_ROWS):
             safe_column = tl.where(augmenting, augmenting_column, 0)
             augmenting_row = tl.max(
                 tl.where(column_mask & (lane == safe_column), path, -1),
@@ -213,6 +215,7 @@ def _linear_assignment_kernel(
             tl.store(col4row + safe_row, augmenting_column, mask=augmenting)
             augmenting = augmenting & (augmenting_row != current_row)
             augmenting_column = tl.where(augmenting, previous_column, augmenting_column)
+            augmentation_steps += 1
 
         # The next row consumes the assignments and potentials written above.
         tl.debug_barrier()
