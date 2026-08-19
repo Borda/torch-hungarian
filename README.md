@@ -167,13 +167,13 @@ validated GPUs and SciPy fallback elsewhere.
 
 Author-run evidence captured on 2026-08-19 currently supports this matrix:
 
-| GPU                                      | Backend under test  | Full benchmark result                                                                                                      |
-| ---------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| NVIDIA T4 (`sm_75`)                      | `0.0.6` legacy CUDA | Legacy is exact in all 30 cases. Triton is unsupported; current public CUDA dispatch uses the SciPy fallback.              |
-| NVIDIA A100 (`sm_80`)                    | Triton              | Exact in 29/30 cases. Batch-624 float32 square (`300 x 300`) fails parity, so this lane is not accepted.                   |
-| NVIDIA H100 (`sm_90`)                    | Triton              | ?                                                                                                                          |
-| NVIDIA L4 (`sm_89`)                      | Triton              | Exact in 19/30 cases. Five batch-208 cases and every batch-624 case fail parity, so this lane is not accepted.             |
-| NVIDIA RTX PRO 6000 Blackwell (`sm_120`) | Triton              | Exact in 27/30 cases. Batch-624 float32 square and float32/float64 direct cases fail parity, so this lane is not accepted. |
+| GPU                                      | Backend under test  | Validation result                                                                                              |
+| ---------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------- |
+| NVIDIA T4 (`sm_75`)                      | `0.0.6` legacy CUDA | Legacy is exact in all 30 benchmark cases. Triton is unsupported; current public CUDA uses the SciPy fallback. |
+| NVIDIA A100 (`sm_80`)                    | Triton              | `77/77` tests pass; exact in all 30 benchmark cases.                                                           |
+| NVIDIA H100 (`sm_90`)                    | Triton              | ?                                                                                                              |
+| NVIDIA L4 (`sm_89`)                      | Triton              | `77/77` tests pass; exact in all 30 benchmark cases.                                                           |
+| NVIDIA RTX PRO 6000 Blackwell (`sm_120`) | Triton              | `77/77` tests pass; exact in all 30 benchmark cases.                                                           |
 
 Representative batch-208 float32 performance is shown below. Each timing cell
 is `transpose / square / direct` in milliseconds for `300 x 100`, `300 x 300`,
@@ -184,20 +184,24 @@ have no publishable timing.
 | --------------- | -------------------- | -------------------- | -------------------- | ------------------ | ------------------ |
 | T4 (cold)       | 69.7 / 730.4 / 398.6 | 37.0 / 879.5 / 273.9 | —                    | —                  | —                  |
 | T4 (warm)       | 66.7 / 733.0 / 397.8 | 37.7 / 738.6 / 272.6 | —                    | —                  | —                  |
-| L4 (cold)       | 73.1 / 786.3 / 421.7 | 37.5 / 635.4 / 275.1 | 47.5 / fail / fail   | 1.5x / — / —       | 0.8x / — / —       |
-| L4 (warm)       | 70.8 / 780.2 / 422.9 | 37.3 / 637.8 / 271.9 | 47.7 / fail / fail   | 1.5x / — / —       | 0.8x / — / —       |
-| A100 (cold)     | 72.9 / 788.6 / 429.5 | 36.3 / 774.8 / 271.5 | 43.3 / 151.6 / 364.9 | 1.7x / 5.2x / 1.2x | 0.8x / 5.1x / 0.7x |
-| A100 (warm)     | 75.3 / 786.3 / 428.3 | 36.2 / 727.9 / 271.6 | 43.5 / 132.6 / 365.2 | 1.7x / 5.9x / 1.2x | 0.8x / 5.5x / 0.7x |
+| L4 (cold)       | 74.0 / 782.8 / 426.4 | 37.4 / 635.3 / 270.2 | 35.5 / 119.8 / 352.1 | 2.1x / 6.5x / 1.2x | 1.1x / 5.3x / 0.8x |
+| L4 (warm)       | 73.3 / 784.8 / 426.8 | 37.3 / 643.7 / 271.5 | 35.5 / 119.8 / 352.1 | 2.1x / 6.6x / 1.2x | 1.1x / 5.4x / 0.8x |
+| A100 (cold)     | 72.5 / 792.9 / 432.2 | 36.3 / 766.6 / 273.4 | 51.2 / 197.3 / 620.4 | 1.4x / 4.0x / 0.7x | 0.7x / 3.9x / 0.4x |
+| A100 (warm)     | 72.5 / 789.9 / 429.8 | 36.4 / 731.9 / 273.2 | 51.2 / 173.2 / 620.4 | 1.4x / 4.6x / 0.7x | 0.7x / 4.2x / 0.4x |
 | H100 (cold)     | ?                    | ?                    | ?                    | ?                  | ?                  |
 | H100 (warm)     | ?                    | ?                    | ?                    | ?                  | ?                  |
-| RTX 6000 (cold) | 32.8 / 408.0 / 199.3 | 35.4 / 606.0 / 250.1 | 28.4 / 84.9 / 228.0  | 1.2x / 4.8x / 0.9x | 1.2x / 7.1x / 1.1x |
-| RTX 6000 (warm) | 32.0 / 408.7 / 203.8 | 35.4 / 608.4 / 249.2 | 28.2 / 84.9 / 228.0  | 1.1x / 4.8x / 0.9x | 1.3x / 7.2x / 1.1x |
+| RTX 6000 (cold) | 31.8 / 408.5 / 199.9 | 35.1 / 599.6 / 248.0 | 29.1 / 92.5 / 343.1  | 1.1x / 4.4x / 0.6x | 1.2x / 6.5x / 0.7x |
+| RTX 6000 (warm) | 32.9 / 408.1 / 204.0 | 35.0 / 599.7 / 246.5 | 29.0 / 92.4 / 343.1  | 1.1x / 4.4x / 0.6x | 1.2x / 6.5x / 0.7x |
 
 The Triton implementation parallelizes batch items and vectorizes each current
 candidate-column scan. The row, shortest-path, and augmentation loops remain
-sequential within each matrix. This produces strong batched throughput but
-shape-dependent latency: square matrices are the clear current win, while the
-rectangular cases range from a small gain to a regression versus legacy.
+sequential within each matrix. The corrected kernel passes parity, but the
+performance gate remains open: square matrices are 4.2x--6.5x faster than
+legacy in this representative warm workload, while direct matrices are only
+0.4x--0.8x as fast.
+
+Cold means the first call in the benchmark process. It is not isolated from
+driver, process, or Triton disk caches populated by the preceding validation.
 
 Do not publish a Triton-only timing as a speedup. Each performance report pairs
 the same seeded workload with its same-machine SciPy CPU baseline. For a
