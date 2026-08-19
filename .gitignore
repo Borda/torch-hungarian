@@ -163,3 +163,5 @@ cython_debug/
 .plans/
 .reports/
 .temp/
+
+notebooks/
