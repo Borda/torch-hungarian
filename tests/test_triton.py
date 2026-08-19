@@ -192,6 +192,21 @@ def test_batch_linear_assignment_compiled_matches_large_batched_oracle(
     assert torch.equal(actual.cpu(), expected)
 
 
+def test_batch_linear_assignment_compiled_matches_direct_benchmark_oracle(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Prevent 1024-lane direct search termination from changing assignments."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(32)
+    cost = torch.randn((208, 300, 600), generator=generator)
+    expected = _scipy_assignment(cost)
+
+    actual = backend.batch_linear_assignment(cost.to(device))
+
+    assert actual.dtype == torch.long
+    assert torch.equal(actual.cpu(), expected)
+
+
 def test_batch_linear_assignment_compiled_handles_non_contiguous_cost(
     triton_backend_device: tuple[object, torch.device],
 ) -> None:

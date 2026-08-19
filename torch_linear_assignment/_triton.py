@@ -95,8 +95,10 @@ def _linear_assignment_kernel(
         search_row = current_row
         num_remaining = NUM_COLUMNS
 
-        for _ in tl.range(0, NUM_COLUMNS, num_stages=1):
-            searching = sink == -1
+        # Wide matrices usually reach an unmatched sink early; do not execute
+        # the remaining masked column-search iterations after that point.
+        searching = True
+        while searching:
             scanned_rows = scanned_rows | (row_mask & (lane == search_row) & searching)
             candidate_mask = active_columns & searching
             previous_cost = shortest_path_costs
@@ -176,6 +178,7 @@ def _linear_assignment_kernel(
             num_remaining = tl.where(step_valid, num_remaining - 1, num_remaining)
             min_value = tl.where(step_valid, lowest, min_value)
             tl.store(infeasible + batch_index, 1, mask=searching & ~has_candidate)
+            searching = matched_step
 
         solved = sink != -1
         tl.store(infeasible + batch_index, 1, mask=~solved)
