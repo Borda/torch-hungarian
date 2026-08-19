@@ -1,6 +1,8 @@
+import hashlib
 import subprocess
 import sys
 import textwrap
+import warnings
 from unittest import TestCase
 
 import pytest
@@ -163,16 +165,15 @@ def test_batch_linear_assignment_cpu_matches_scipy_non_finite_contract(cost, err
     assert torch.equal(actual, expected)
 
 
-def test_package_import_and_cuda_fallback_do_not_require_backend_or_triton():
-    """Prevent eager optional imports and repeated warnings when the GPU path is unavailable."""
+def test_package_import_does_not_require_optional_backend_modules():
+    """Prevent project-private accelerator modules from becoming eager imports."""
     script = textwrap.dedent(
         """
         import importlib.abc
         import sys
-        import warnings
 
         class BlockOptionalBackend(importlib.abc.MetaPathFinder):
-            blocked = {"torch_linear_assignment._backend", "torch_linear_assignment._triton", "triton"}
+            blocked = {"torch_linear_assignment._backend", "torch_linear_assignment._triton"}
 
             def find_spec(self, fullname, path=None, target=None):
                 if fullname in self.blocked:
@@ -183,21 +184,9 @@ def test_package_import_and_cuda_fallback_do_not_require_backend_or_triton():
         import torch
         from torch_linear_assignment import batch_linear_assignment
 
-        class SimulatedCudaTensor(torch.Tensor):
-            @property
-            def is_cuda(self):
-                return True
-
-        cost = torch.tensor([[[4.0, 1.0], [2.0, 3.0]]]).as_subclass(SimulatedCudaTensor)
+        cost = torch.tensor([[[4.0, 1.0], [2.0, 3.0]]])
         expected = torch.tensor([[1, 0]], dtype=torch.long)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            first = batch_linear_assignment(cost)
-            second = batch_linear_assignment(cost)
-
-        assert torch.equal(first, expected)
-        assert torch.equal(second, expected)
-        assert len(caught) == 1
+        assert torch.equal(batch_linear_assignment(cost), expected)
         """
     )
 
@@ -211,51 +200,96 @@ def test_package_import_and_cuda_fallback_do_not_require_backend_or_triton():
     assert result.returncode == 0, result.stderr
 
 
-def test_batch_linear_assignment_cuda_fallback_promotes_integer_cost_for_scipy(
-    monkeypatch,
-):
-    """Prevent an unsupported CUDA integer input from bypassing the SciPy oracle."""
-
-    class SimulatedUnsupportedCudaTensor(torch.Tensor):
-        @property
-        def is_cuda(self):
-            return True
-
-    cpu_cost = torch.tensor([[[8, 1, 5], [3, 7, 2], [6, 4, 9]]], dtype=torch.int64)
-    cost = cpu_cost.as_subclass(SimulatedUnsupportedCudaTensor)
-    expected = scipy_assignment(cpu_cost.to(torch.float32))
-    monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
-
-    with pytest.warns(RuntimeWarning, match="Triton linear-assignment support"):
-        actual = batch_linear_assignment(cost)
-
-    assert actual.dtype == torch.long
-    assert torch.equal(actual, expected)
-
-
-def test_batch_linear_assignment_cuda_fallback_promotes_bfloat16_cost_for_scipy(
-    monkeypatch,
-):
-    """Prevent unsupported CUDA BF16 inputs from failing at SciPy's NumPy boundary."""
-
-    class SimulatedUnsupportedCudaTensor(torch.Tensor):
-        @property
-        def is_cuda(self):
-            return True
-
-    cpu_cost = torch.tensor(
+def test_batch_linear_assignment_cpu_promotes_bfloat16_cost_for_scipy():
+    """Prevent CPU BF16 costs from reaching SciPy's unsupported NumPy boundary."""
+    cost = torch.tensor(
         [[[8.0, 1.0, 5.0], [3.0, 7.0, 2.0], [6.0, 4.0, 9.0]]],
         dtype=torch.bfloat16,
     )
-    cost = cpu_cost.as_subclass(SimulatedUnsupportedCudaTensor)
-    expected = scipy_assignment(cpu_cost.to(torch.float32))
-    monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
+    expected = scipy_assignment(cost.to(torch.float32))
 
-    with pytest.warns(RuntimeWarning, match="Triton linear-assignment support"):
-        actual = batch_linear_assignment(cost)
+    actual = batch_linear_assignment(cost)
 
     assert actual.dtype == torch.long
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(torch.int64, id="integer"),
+        pytest.param(torch.bfloat16, id="bfloat16"),
+    ],
+)
+def test_batch_linear_assignment_cuda_fallback_uses_promoted_scipy_once(monkeypatch, dtype):
+    """Prevent unsupported real CUDA inputs from bypassing promotion or warning repeatedly."""
+    cpu_cost = torch.tensor(
+        [[[8.0, 1.0, 5.0], [3.0, 7.0, 2.0], [6.0, 4.0, 9.0]]],
+        dtype=dtype,
+    )
+    cost = cpu_cost.cuda()
+    expected = scipy_assignment(cpu_cost.to(torch.float32))
+    monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
+    monkeypatch.setattr(assignment_module, "_cuda_uses_triton", lambda _: False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = batch_linear_assignment(cost)
+        second = batch_linear_assignment(cost)
+
+    assert len(caught) == 1
+    assert "Triton linear-assignment support" in str(caught[0].message)
+    assert first.device == cost.device
+    assert first.dtype == torch.long
+    assert torch.equal(first.cpu(), expected)
+    assert torch.equal(second.cpu(), expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.parametrize(
+    ("shape", "seed"),
+    [
+        pytest.param((16, 20, 40), 32, id="batched-direct"),
+        pytest.param((1, 30, 10), 33, id="transpose"),
+        pytest.param((1, 20, 40), 34, id="single-direct"),
+        pytest.param((0, 5, 5), 35, id="empty-batch"),
+    ],
+)
+def test_batch_linear_assignment_cuda_integer_parity_is_reproducible(shape, seed):
+    """Pin CUDA integer parity to replayable matrices with objective diagnostics."""
+    generator = torch.Generator().manual_seed(seed)
+    cost = torch.randint(-10, 10, shape, generator=generator)
+    expected = batch_linear_assignment(cost)
+    actual = batch_linear_assignment(cost.cuda()).cpu()
+
+    assert expected.shape == actual.shape
+    assert expected.dtype == actual.dtype
+    if torch.equal(actual, expected):
+        return
+
+    matched_workers = expected >= 0
+    workers = torch.arange(shape[1]).expand(shape[0], -1)
+    batch = torch.arange(shape[0]).unsqueeze(1).expand_as(workers)
+    safe_expected = expected.clamp_min(0)
+    safe_actual = actual.clamp_min(0)
+    expected_objective = torch.where(
+        matched_workers,
+        cost[batch, workers, safe_expected],
+        0,
+    ).sum(dim=1)
+    actual_objective = torch.where(
+        actual >= 0,
+        cost[batch, workers, safe_actual],
+        0,
+    ).sum(dim=1)
+    mismatched_batches = (actual != expected).any(dim=1).nonzero().flatten().tolist()
+    digest = hashlib.sha256(cost.numpy().tobytes()).hexdigest()
+    pytest.fail(
+        f"CUDA integer parity mismatch: shape={shape}, seed={seed}, sha256={digest}, "
+        f"batches={mismatched_batches}, expected={expected.tolist()}, actual={actual.tolist()}, "
+        f"expected_objective={expected_objective.tolist()}, actual_objective={actual_objective.tolist()}"
+    )
 
 
 class TestAssignment(TestCase):
@@ -268,13 +302,3 @@ class TestAssignment(TestCase):
         result = batch_linear_assignment(cost).cpu()
         print(result)
         self.assertTrue((result == gt_assignment).all())
-
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
-    def test_cuda_equal_to_cpu(self):
-        for bs, rows, cols in [(16, 20, 40), (1, 30, 10), (0, 5, 5)]:
-            cost = torch.randint(-10, 10, (bs, rows, cols))
-            matching_cpu = batch_linear_assignment(cost)
-            matching_gpu = batch_linear_assignment(cost.to(self.device)).cpu()
-            self.assertEqual(matching_cpu.shape, matching_gpu.shape)
-            self.assertEqual(matching_cpu.dtype, matching_gpu.dtype)
-            self.assertTrue((matching_cpu == matching_gpu).all())

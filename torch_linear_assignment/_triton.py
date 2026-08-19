@@ -86,9 +86,13 @@ def _linear_assignment_kernel(
         tl.store(scanned_columns + lane, 0, mask=column_mask)
         tl.store(remaining + lane, NUM_COLUMNS - lane - 1, mask=column_mask)
         tl.store(shortest_path_costs + lane, float("inf"), mask=column_mask)
+        # Later lanes dereference the initialized scan-order workspaces.
+        tl.debug_barrier()
 
         sink = -1
-        min_value = 0.0
+        current_potential = tl.load(u + current_row)
+        # A workspace-derived zero keeps this loop-carried value FP32 or FP64.
+        min_value = current_potential - current_potential
         search_row = current_row
         num_remaining = NUM_COLUMNS
 
@@ -156,11 +160,12 @@ def _linear_assignment_kernel(
             num_remaining = tl.where(step_valid, num_remaining - 1, num_remaining)
             min_value = tl.where(step_valid, lowest, min_value)
             tl.store(infeasible + batch_index, 1, mask=searching & ~has_candidate)
+            # Swap-removal changes which lane reads each workspace entry next.
+            tl.debug_barrier()
 
         solved = sink != -1
         tl.store(infeasible + batch_index, 1, mask=~solved)
 
-        current_potential = tl.load(u + current_row)
         tl.store(u + current_row, current_potential + min_value, mask=solved)
         visited_rows = tl.load(scanned_rows + lane, mask=row_mask, other=0) != 0
         assigned_columns = tl.load(col4row + lane, mask=row_mask, other=0)
@@ -193,6 +198,9 @@ def _linear_assignment_kernel(
             tl.store(col4row + safe_row, augmenting_column, mask=augmenting)
             augmenting = augmenting & (augmenting_row != current_row)
             augmenting_column = tl.where(augmenting, previous_column, augmenting_column)
+
+        # The next row consumes the assignments and potentials written above.
+        tl.debug_barrier()
 
 
 def _validate_mode(validation: ValidationMode) -> None:
