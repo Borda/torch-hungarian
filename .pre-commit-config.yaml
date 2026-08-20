@@ -23,5 +23,6 @@ repos:
     rev: 0.7.22
     hooks:
       - id: mdformat
+        args: ["--number", "--wrap=no"]
         additional_dependencies:
           - mdformat-gfm
