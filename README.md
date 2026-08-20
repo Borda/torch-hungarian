@@ -23,10 +23,10 @@ The active release line is `0.1.0+`. It uses Triton on validated Linux NVIDIA GP
 
 ## Install
 
-Python 3.10 or newer is required. Install the current `0.1.0+` package from PyPI:
+Python 3.10 or newer is required. Install the `0.1.0` release candidate from PyPI:
 
 ```bash
-python -m pip install "torch-linear-assignment>=0.1"
+python -m pip install "torch-linear-assignment==0.1.0rc0"
 ```
 
 No editable install, local CUDA compilation, or `--no-build-isolation` flag is needed for normal use. On Linux, the package declares Triton through a platform marker and imports it lazily only for an eligible CUDA input. macOS and Windows installs remain usable through SciPy without requiring Triton.
