@@ -31,6 +31,8 @@ install-legacy:
 	cd "$$verify_dir"; \
 	TLA_CHECKOUT="$(CURDIR)" $(PYTHON) -c "import importlib.metadata as m, os; from pathlib import Path; import torch_linear_assignment as package; version = m.version('torch-linear-assignment'); origin = Path(package.__file__).resolve(); checkout = Path(os.environ['TLA_CHECKOUT']).resolve(); assert version == '0.0.6', version; assert checkout not in origin.parents, f'checkout shadows legacy install: {origin}'; print(f'Legacy distribution: {version} | module: {origin}')"
 
+# The same tooling is declared as the pyproject "test" dependency group; pip
+# below 25.1 cannot install a group, so this target names the packages instead.
 install-dev: install
 	$(PYTHON) -m pip install pandas pytest tqdm
 

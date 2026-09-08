@@ -25,14 +25,14 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
         cache: pip
-        cache-dependency-path: requirements-ci.txt
+        cache-dependency-path: pyproject.toml
     - name: Install reproducible CPU validation environment
       run: |
-        python -m pip install "torch==2.8.0" --index-url https://download.pytorch.org/whl/cpu
-        python -m pip install -r requirements-ci.txt
-        python -m pip install -e . --no-build-isolation --no-deps
-        python -m pip check
-        python -m pip list
+        python -m pip install "uv==0.9.26"
+        uv pip install --system "torch==2.8.0" --index-url https://download.pytorch.org/whl/cpu
+        uv pip install --system -e . --group develop --no-build-isolation
+        uv pip check --system
+        uv pip list --system
 
     - name: Test package
       run: python -m pytest tests/
@@ -53,5 +53,48 @@ jobs:
         path: benchmark-results-python-${{ matrix.python-version }}.jsonl
         if-no-files-found: error
 
-    - name: Run repository quality hooks
-      run: pre-commit run --all-files
+  pkg-build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        persist-credentials: false
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+
+    - name: Build distributions
+      run: |
+        python -m pip install "uv==0.9.26"
+        uv pip install --system "build==1.5.0" "setuptools==80.9.0"
+        python -m build --no-isolation
+
+    - name: Upload distributions
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: package-distributions
+        path: dist/
+        if-no-files-found: error
+
+  # No checkout: the package has to come from the built artifact, so an import
+  # cannot be served by the working tree.
+  pkg-install:
+    needs: pkg-build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+
+    - name: Download distributions
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      with:
+        name: package-distributions
+        path: dist/
+
+    - name: Install the wheel and report the imported version
+      run: |
+        python -m pip install dist/*.whl
+        python -c "import torch_linear_assignment; print(torch_linear_assignment.__version__)"

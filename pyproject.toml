@@ -1,8 +1,69 @@
 [build-system]
 requires = [
-    "setuptools",
+    "setuptools>=64",
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-hungarian"
+dynamic = [
+    "version",
+]
+description = "Batched linear assignment with PyTorch and CUDA."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Ivan Karpukhin", email = "karpuhini@yandex.ru" },
+]
+maintainers = [
+    { name = "Jirka Borovec (Borda)" },
+]
+dependencies = [
+    "torch>=2.0.0",
+    "scipy>=1.6.0",
+    # Triton publishes x86_64 Linux wheels only, and PyTorch itself scopes its own
+    # Triton dependency the same way.
+    "triton; platform_system == 'Linux' and platform_machine == 'x86_64'",
+]
+
+# Dependency groups stay out of the published metadata, unlike extras.
+[dependency-groups]
+# Unpinned tooling for local development, so a checkout never replaces the
+# PyTorch build the machine already has.
+test = [
+    "pandas",
+    "pytest",
+    "tqdm",
+]
+# Reproducible hosted CPU validation snapshot. Runtime support bounds stay in
+# the dependencies list above. The CPU torch wheel drops the Triton dependency
+# that the CUDA wheel carries, so this snapshot pins Triton explicitly to keep
+# the dependency check honest about the declared Linux runtime dependency.
+develop = [
+    "torch==2.8.0",
+    "triton==3.4.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "scipy==1.15.3",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "pytest==9.1.1",
+    "tqdm==4.67.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Borda/torch-hungarian"
+Source = "https://github.com/Borda/torch-hungarian"
+Changelog = "https://github.com/Borda/torch-hungarian/blob/main/CHANGELOG.md"
+Upstream = "https://github.com/ivan-chai/torch-linear-assignment"
+
+[tool.setuptools.packages.find]
+where = [
+    "src",
+]
+
+# The version literal lives in the package, so an import reports exactly what
+# the distribution metadata declares.
+[tool.setuptools.dynamic]
+version = { attr = "torch_linear_assignment.__version__" }
 
 [tool.ruff]
 line-length = 120
