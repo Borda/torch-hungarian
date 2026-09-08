@@ -85,6 +85,8 @@ The public API is `batch_linear_assignment(cost)` with cost shape `(B, W, T)`. A
 
 The solver promotes `float16`, `bfloat16`, and integer costs to `float32`; `float64` costs remain `float64`. Triton execution disables autocast, so precision already lost before entry cannot be recovered.
 
+Costs may require gradients; solving leaves their autograd graph intact and returns non-differentiable integer assignments. Complex costs raise `TypeError("Complex costs are not supported.")` on every backend, including empty batches.
+
 Non-finite costs follow the SciPy contract. `NaN` and `-inf` raise `ValueError("matrix contains invalid numeric entries")`. `+inf` represents a forbidden edge when a perfect matching still exists; if the matrix is infeasible, the call raises `ValueError("cost matrix is infeasible")` instead of terminating the process with a device assertion.
 
 ## Validation and performance status
@@ -106,9 +108,13 @@ make benchmark-evidence  # validation overhead, memory, and isolated cold compil
 
 `make benchmark` is fail-closed by default. Missing GPU/backend execution, OOM, worker failure, identity mismatch, incomplete process rounds, and parity failure all exit nonzero. `--allow-incomplete` is only for CPU-only diagnostics; its rows remain ineligible for performance acceptance.
 
+Each benchmark worker has a 900-second timeout covering process startup, compilation, and all timed calls. Override it with `--worker-timeout-seconds` using a positive finite number, for example `make benchmark BENCHMARK_ARGS="--worker-timeout-seconds 1800"`. A timed-out worker produces a `worker_timeout` record with its workload and timeout limit; it cannot satisfy performance acceptance.
+
 Each case runs in a fresh interpreter; each Triton case also uses a unique empty Triton cache. Cold is the first timed solver call after benchmark/package import and input setup. CUDA rows additionally complete context setup and input transfer before timing. Explicit private lanes resolve their backend module before timing; the default public lane includes any lazy backend import. Triton cold includes kernel compilation and execution. The default three process rounds retain three raw cold samples and reverse backend order on alternating rounds. Warm CUDA samples are synchronized, device-resident solver latency. They include backend-adapter work, implementation validation when applicable, workspace allocation, execution, and result conversion, but exclude input generation/transfer, SciPy-oracle construction, and parity diagnostics. GPU driver and hardware state are observed, not reset.
 
 Every cold, warmup, and timed result must exactly match the promoted SciPy assignment. JSONL records bind evidence to the benchmark Git revision/source digest, imported package origin/digest, executed backend module/digest, input digest, raw samples, CPU model, dependency versions, and available `nvidia-smi` driver/clock/power/temperature state. The console table is only a one-decimal summary.
+
+Each worker also records its imported dispatch module in `assignment_module_origin` and `assignment_module_sha256`. `benchmark_git_dirty` reports `clean`, `dirty`, or `unavailable` for the benchmark's source checkout, independently of any supplied revision. Package/dispatch hashes describe the worker's imported files, which can belong to a separately installed legacy distribution.
 
 The first Triton call may be slower because it includes cold compilation; measure cold compilation separately from warm execution. Do not generalize performance across GPU models or workloads. The active `0.1.0+` line requires the correctness, AMP/dtype, fallback, packaging, GPU, and warm-performance gates to pass on each advertised GPU class.
 

@@ -360,6 +360,39 @@ def test_batch_linear_assignment_compiled_accepts_positive_infinity_edges(
     assert torch.equal(actual.cpu(), expected)
 
 
+@pytest.mark.parametrize("validation", ["full", "off", "nonfinite_only", "infeasibility_flag_only"])
+@pytest.mark.parametrize(
+    "cost",
+    [
+        pytest.param(torch.tensor([[[4 + 1j, 1 + 2j], [2 + 3j, 3 + 4j]]]), id="complex64"),
+        pytest.param(torch.tensor([[[complex(1, float("nan"))]]], dtype=torch.complex128), id="imaginary-nan"),
+        pytest.param(torch.empty((0, 2, 2), dtype=torch.complex64), id="empty-complex-batch"),
+    ],
+)
+def test_batch_linear_assignment_compiled_rejects_complex_costs(
+    triton_backend_device: tuple[object, torch.device], cost: torch.Tensor, validation: str
+) -> None:
+    """Never solve a real projection of complex costs, even with validation off."""
+    backend, device = triton_backend_device
+
+    with pytest.raises(TypeError, match="Complex costs are not supported"):
+        backend.batch_linear_assignment(cost.to(device), validation=validation)
+
+
+def test_batch_linear_assignment_compiled_accepts_costs_requiring_grad(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Accept model-derived costs while keeping discrete assignments detached."""
+    backend, device = triton_backend_device
+    cost = torch.tensor([[[4.0, 1.0], [2.0, 3.0]]], device=device, requires_grad=True)
+
+    actual = backend.batch_linear_assignment(cost)
+
+    assert torch.equal(actual.cpu(), torch.tensor([[1, 0]], dtype=torch.long))
+    assert cost.requires_grad
+    assert not actual.requires_grad
+
+
 def test_batch_linear_assignment_compiled_obeys_non_default_stream(
     triton_backend_device: tuple[object, torch.device],
 ) -> None:

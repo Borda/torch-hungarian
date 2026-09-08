@@ -35,6 +35,7 @@ from tqdm.auto import tqdm
 from torch_linear_assignment import batch_linear_assignment
 
 _WORKER_RECORD_PREFIX = "__TLA_BENCHMARK_RECORD__="
+_DEFAULT_WORKER_TIMEOUT_SECONDS = 900.0
 
 _DTYPES = {
     "float16": torch.float16,
@@ -68,6 +69,17 @@ def _integer_csv(value: str) -> list[int]:
     if any(item <= 0 for item in values):
         raise argparse.ArgumentTypeError("workload dimensions must be positive")
     return values
+
+
+def _positive_finite_seconds(value: str) -> float:
+    """Parse a positive, finite subprocess timeout in seconds."""
+    try:
+        seconds = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected a positive finite number of seconds") from error
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("expected a positive finite number of seconds")
+    return seconds
 
 
 def _arguments() -> argparse.Namespace:
@@ -105,6 +117,12 @@ def _arguments() -> argparse.Namespace:
         type=int,
         default=3,
         help="fresh-process repetitions; alternate rounds reverse backend order",
+    )
+    parser.add_argument(
+        "--worker-timeout-seconds",
+        type=_positive_finite_seconds,
+        default=_DEFAULT_WORKER_TIMEOUT_SECONDS,
+        help="maximum fresh-worker runtime in seconds; default accommodates cold GPU compilation",
     )
     parser.add_argument(
         "--backend-order",
@@ -224,7 +242,11 @@ def _source_metadata() -> dict[str, str | None]:
     package_module = importlib.import_module("torch_linear_assignment")
     package_origin = getattr(package_module, "__file__", None)
     package_path = Path(package_origin).resolve() if package_origin else None
+    assignment_module = importlib.import_module("torch_linear_assignment.assignment")
+    assignment_origin = getattr(assignment_module, "__file__", None)
+    assignment_path = Path(assignment_origin).resolve() if assignment_origin else None
     revision = os.environ.get("TLA_BENCHMARK_GIT_REVISION")
+    dirty = "unavailable"
     if revision is None:
         try:
             revision = subprocess.run(
@@ -237,15 +259,37 @@ def _source_metadata() -> dict[str, str | None]:
             ).stdout.strip()
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             revision = None
+    try:
+        dirty = (
+            "dirty"
+            if subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                check=True,
+                cwd=script_path.parent.parent,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            else "clean"
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
     return {
         "benchmark_path": str(script_path),
         "benchmark_execution_path": str(execution_path),
         "benchmark_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest(),
         "benchmark_git_revision": revision,
+        "benchmark_git_dirty": dirty,
         "package_module_origin": str(package_path) if package_path else None,
         "package_module_sha256": (
             hashlib.sha256(package_path.read_bytes()).hexdigest()
             if package_path is not None and package_path.is_file()
+            else None
+        ),
+        "assignment_module_origin": str(assignment_path) if assignment_path else None,
+        "assignment_module_sha256": (
+            hashlib.sha256(assignment_path.read_bytes()).hexdigest()
+            if assignment_path is not None and assignment_path.is_file()
             else None
         ),
     }
@@ -1007,6 +1051,12 @@ def _case_status_record(specification: dict[str, Any], status: str, detail: str 
 
 def _worker_case_record(specification: dict[str, Any]) -> dict[str, Any]:
     """Execute one isolated case while converting expected memory failures to evidence."""
+    run_metadata = specification.get("run_metadata")
+    if run_metadata is not None:
+        specification = {
+            **specification,
+            "run_metadata": {**run_metadata, "source": _source_metadata()},
+        }
     try:
         return _case_record(**specification)
     except (torch.OutOfMemoryError, MemoryError) as error:
@@ -1017,26 +1067,37 @@ def _worker_case_record(specification: dict[str, Any]) -> dict[str, Any]:
 
 def _isolated_case_record(specification: dict[str, Any]) -> dict[str, Any]:
     """Run one backend/case in a fresh interpreter and recover its JSON record."""
+    worker_timeout_seconds = specification.get("worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS)
     worker_specification = {
-        **specification,
+        **{key: value for key, value in specification.items() if key != "worker_timeout_seconds"},
         "process_isolated": True,
         "cold_cache_policy": "empty_unique_triton_cache",
     }
-    with tempfile.TemporaryDirectory(prefix="tla-triton-cache-") as cache_directory:
-        environment = os.environ.copy()
-        environment["TRITON_CACHE_DIR"] = cache_directory
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--worker-case",
-                json.dumps(worker_specification),
-            ],
-            capture_output=True,
-            check=False,
-            env=environment,
-            text=True,
+    try:
+        with tempfile.TemporaryDirectory(prefix="tla-triton-cache-") as cache_directory:
+            environment = os.environ.copy()
+            environment["TRITON_CACHE_DIR"] = cache_directory
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--worker-case",
+                    json.dumps(worker_specification),
+                ],
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+                timeout=worker_timeout_seconds,
+            )
+    except subprocess.TimeoutExpired:
+        record = _case_status_record(
+            specification,
+            "worker_timeout",
+            f"worker exceeded configured {worker_timeout_seconds:g}-second timeout",
         )
+        record["worker_timeout_seconds"] = worker_timeout_seconds
+        return record
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"worker exited {completed.returncode}"
         return _case_status_record(specification, "worker_failed", detail[-4000:])
@@ -1137,6 +1198,7 @@ def main() -> None:
             "process_round": process_round,
             "cold_samples_required": arguments.process_rounds,
             "run_metadata": run_metadata,
+            "worker_timeout_seconds": getattr(arguments, "worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS),
         }
         record = _isolated_case_record(specification)
         records.append(record)

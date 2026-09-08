@@ -21,8 +21,8 @@ def _prepare_solver_cost(cost: torch.Tensor) -> torch.Tensor:
 
 
 def batch_linear_assignment_cpu(cost: torch.Tensor) -> torch.Tensor:
-    """Solve batched assignment with SciPy on the cost tensor's CPU device."""
-    cost = _prepare_solver_cost(cost)
+    """Solve CPU costs with SciPy without retaining their autograd graph."""
+    cost = _prepare_solver_cost(cost.detach())
     batch_size, workers, _ = cost.shape
     matching = torch.full([batch_size, workers], -1, dtype=torch.long, device=cost.device)
     for batch_index in range(batch_size):
@@ -87,7 +87,8 @@ def batch_linear_assignment_cuda(cost: torch.Tensor) -> torch.Tensor:
 def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
     """Solve a batch of linear assignment problems.
 
-    The method minimizes the cost.
+    The method minimizes real-valued costs. Costs may require gradients;
+    the returned discrete assignment is not differentiable.
 
     Args:
       cost: Cost matrix with shape (B, W, T), where W is the number of workers
@@ -96,9 +97,16 @@ def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
     Returns:
       Matching tensor with shape (B, W), with assignments for each worker. If the
       task was not assigned, the corresponding index will be -1.
+
+    Raises:
+      TypeError: If costs have a complex dtype.
+      ValueError: If costs have the wrong rank, invalid numeric entries, or no
+        feasible matching.
     """
     if cost.ndim != 3:
         raise ValueError("Need 3-dimensional tensor with shape (B, W, T).")
+    if cost.is_complex():
+        raise TypeError("Complex costs are not supported.")
     if cost.is_cuda and _cuda_uses_triton(cost):
         return batch_linear_assignment_cuda(cost)
 

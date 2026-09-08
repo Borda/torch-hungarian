@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Accept gradient-bearing CPU costs and unsupported-CUDA fallback costs without changing the input's autograd graph.
+- Reject complex costs consistently before backend dispatch or private Triton conversion, including empty batches and private validation modes.
+- Bind benchmark evidence to each worker's imported dispatch source and record the benchmark checkout's dirty state even when the revision is supplied by the copied runner.
+- Bound benchmark workers to 900 seconds by default, configurable with `--worker-timeout-seconds`; record timeouts as ineligible `worker_timeout` results.
+
 ## 0.1.0rc1 - 2026-09-08
 
 ### Added

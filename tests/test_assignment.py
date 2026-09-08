@@ -214,22 +214,62 @@ def test_batch_linear_assignment_cpu_promotes_bfloat16_cost_for_scipy():
     assert torch.equal(actual, expected)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16], ids=["fp32", "fp64", "bf16"])
+def test_batch_linear_assignment_cpu_accepts_costs_requiring_grad(dtype):
+    """Solve model-derived costs without altering the input's autograd graph."""
+    leaf = torch.tensor([[[4.0, 1.0], [2.0, 3.0]]], dtype=dtype, requires_grad=True)
+    cost = leaf * 2
+    original = cost.detach().clone()
+
+    actual = batch_linear_assignment(cost)
+
+    assert torch.equal(actual, torch.tensor([[1, 0]], dtype=torch.long))
+    assert not actual.requires_grad
+    assert cost.requires_grad
+    assert torch.equal(cost.detach(), original)
+    cost.sum().backward()
+    assert torch.equal(leaf.grad, torch.full_like(leaf, 2))
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")),
+    ],
+)
+@pytest.mark.parametrize(
+    "cost",
+    [
+        pytest.param(torch.tensor([[[4 + 1j, 1 + 2j], [2 + 3j, 3 + 4j]]]), id="complex64"),
+        pytest.param(torch.tensor([[[complex(1, float("nan"))]]], dtype=torch.complex128), id="imaginary-nan"),
+        pytest.param(torch.empty((0, 2, 2), dtype=torch.complex64), id="empty-complex-batch"),
+    ],
+)
+def test_batch_linear_assignment_rejects_complex_costs(cost, device):
+    """Reject undefined complex objectives, including empty and invalid batches."""
+    with pytest.raises(TypeError, match="Complex costs are not supported"):
+        batch_linear_assignment(cost.to(device))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 @pytest.mark.parametrize(
     "dtype",
     [
         pytest.param(torch.int64, id="integer"),
         pytest.param(torch.bfloat16, id="bfloat16"),
+        pytest.param(torch.float32, id="float32-requires-grad"),
     ],
 )
 def test_batch_linear_assignment_cuda_fallback_uses_promoted_scipy_once(monkeypatch, dtype):
-    """Prevent unsupported real CUDA inputs from bypassing promotion or warning repeatedly."""
+    """Keep fallback promotion, autograd inputs, and warn-once behavior consistent."""
     cpu_cost = torch.tensor(
         [[[8.0, 1.0, 5.0], [3.0, 7.0, 2.0], [6.0, 4.0, 9.0]]],
         dtype=dtype,
+        requires_grad=dtype == torch.float32,
     )
     cost = cpu_cost.cuda()
-    expected = scipy_assignment(cpu_cost.to(torch.float32))
+    expected = scipy_assignment(cpu_cost.detach().to(torch.float32))
     monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
     monkeypatch.setattr(assignment_module, "_cuda_uses_triton", lambda _: False)
 
@@ -244,6 +284,10 @@ def test_batch_linear_assignment_cuda_fallback_uses_promoted_scipy_once(monkeypa
     assert first.dtype == torch.long
     assert torch.equal(first.cpu(), expected)
     assert torch.equal(second.cpu(), expected)
+    if dtype == torch.float32:
+        assert cost.requires_grad
+        cost.sum().backward()
+        assert torch.equal(cpu_cost.grad, torch.ones_like(cpu_cost))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")

@@ -287,12 +287,14 @@ def batch_linear_assignment(
     *,
     validation: ValidationMode = "full",
 ) -> torch.Tensor:
-    """Solve a CUDA batch with full validation unless private benchmarks opt out."""
+    """Solve real CUDA costs; private validation modes never permit complex input."""
     _validate_mode(validation)
     if cost.ndim != 3:
         raise ValueError("Need 3-dimensional tensor with shape (B, W, T).")
     if not cost.is_cuda:
         raise ValueError("Triton linear assignment requires a CUDA tensor.")
+    if cost.is_complex():
+        raise TypeError("Complex costs are not supported.")
     if validation in {"full", "nonfinite_only"}:
         _reject_invalid_numeric_entries(cost)
 

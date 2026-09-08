@@ -51,6 +51,7 @@ def test_default_backends_compare_scipy_cpu_and_public_cuda(monkeypatch: pytest.
     assert arguments.backends == ["scipy", "public_cuda"]
     assert arguments.seed == 320
     assert arguments.process_rounds == 3
+    assert arguments.worker_timeout_seconds == 900.0
     assert arguments.backend_order == "alternate"
     assert arguments.allow_incomplete is False
 
@@ -73,19 +74,28 @@ def test_cpu_device_metadata_and_versions_identify_the_installed_package() -> No
 def test_source_metadata_hashes_benchmark_and_imported_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prevent development artifacts from losing source and installed-module identity."""
-    monkeypatch.setattr(
-        benchmark.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(stdout="abc123\n"),
-    )
+    """Prevent development artifacts from losing dispatch and dirty-worktree identity."""
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        """Return independent revision and tracked-worktree evidence."""
+        if command == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="abc123\n")
+        assert command == ["git", "status", "--porcelain"]
+        return SimpleNamespace(stdout=" M src/torch_linear_assignment/assignment.py\n")
+
+    monkeypatch.setattr(benchmark.subprocess, "run", run)
 
     source = benchmark._source_metadata()
 
     assert source["benchmark_git_revision"] == "abc123"
+    assert source["benchmark_git_dirty"] == "dirty"
     assert len(source["benchmark_sha256"]) == 64
     assert source["package_module_origin"]
     assert len(source["package_module_sha256"]) == 64
+    assignment_path = Path(benchmark.importlib.import_module("torch_linear_assignment.assignment").__file__).resolve()
+    assert source["assignment_module_origin"] == str(assignment_path)
+    assert source["assignment_module_sha256"] == hashlib.sha256(assignment_path.read_bytes()).hexdigest()
+    assert source["assignment_module_sha256"] != source["package_module_sha256"]
 
 
 def test_source_metadata_accepts_original_path_and_revision_from_copied_runner(
@@ -98,13 +108,30 @@ def test_source_metadata_accepts_original_path_and_revision_from_copied_runner(
     monkeypatch.setattr(
         benchmark.subprocess,
         "run",
-        lambda *_args, **_kwargs: pytest.fail("environment provenance must avoid git subprocess"),
+        lambda command, **_kwargs: (
+            SimpleNamespace(stdout="")
+            if command == ["git", "status", "--porcelain"]
+            else pytest.fail("environment revision must avoid a second git revision subprocess")
+        ),
     )
 
     source = benchmark._source_metadata()
 
     assert source["benchmark_path"] == str(original)
     assert source["benchmark_git_revision"] == "copied-run-revision"
+    assert source["benchmark_git_dirty"] == "clean"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_arguments_reject_non_positive_or_non_finite_worker_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """Prevent an unbounded worker subprocess from becoming a stuck benchmark run."""
+    monkeypatch.setattr(sys, "argv", ["benchmark.py", "--worker-timeout-seconds", value])
+
+    with pytest.raises(SystemExit, match="2"):
+        benchmark._arguments()
 
 
 def test_public_cuda_backend_uses_the_installed_public_callable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -674,6 +701,7 @@ def test_isolated_case_uses_a_unique_triton_cache_and_records_policy(
         """Capture the isolated-worker command and its cache environment."""
         observed["command"] = command
         observed["cache_dir"] = kwargs["env"]["TRITON_CACHE_DIR"]  # type: ignore[index]
+        observed["timeout"] = kwargs["timeout"]
         return SimpleNamespace(
             returncode=0,
             stdout='__TLA_BENCHMARK_RECORD__={"status": "measured"}\n',
@@ -698,6 +726,7 @@ def test_isolated_case_uses_a_unique_triton_cache_and_records_policy(
 
     assert record == {"status": "measured"}
     assert "--worker-case" in observed["command"]  # type: ignore[operator]
+    assert observed["timeout"] == 900.0
     assert Path(str(observed["cache_dir"])).exists() is False
 
 
@@ -763,12 +792,67 @@ def test_isolated_case_marks_the_fresh_cache_policy_in_worker_specification(
             "seed": 320,
             "warmup": 0,
             "repetitions": 1,
+            "worker_timeout_seconds": 12.0,
         }
     )
 
     specification = captured["specification"]
     assert specification["process_isolated"] is True  # type: ignore[index]
     assert specification["cold_cache_policy"] == "empty_unique_triton_cache"  # type: ignore[index]
+    assert "worker_timeout_seconds" not in specification  # type: ignore[operator]
+
+
+def test_isolated_case_returns_a_fail_closed_workload_record_after_actual_worker_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Prevent a hung fresh worker from leaving an incomplete benchmark command running."""
+    worker = tmp_path / "sleeping-worker.py"
+    worker.write_text("import time\ntime.sleep(10)\n", encoding="utf-8")
+    monkeypatch.setattr(benchmark, "__file__", str(worker))
+    specification = {
+        "run_id": "test-run",
+        "backend": "triton",
+        "validation": "full",
+        "batch": 1,
+        "workers": 2,
+        "tasks": 2,
+        "dtype_name": "float32",
+        "seed": 320,
+        "warmup": 0,
+        "repetitions": 1,
+        "worker_timeout_seconds": 0.1,
+    }
+
+    record = benchmark._isolated_case_record(specification)
+
+    assert record["status"] == "worker_timeout"
+    assert record["acceptance_eligible"] is False
+    assert record["shape"] == {"batch": 1, "workers": 2, "tasks": 2}
+    assert record["worker_timeout_seconds"] == 0.1
+
+
+def test_isolated_worker_replaces_parent_source_snapshot_with_its_own_provenance() -> None:
+    """Prevent fresh-process rows from reporting source metadata captured only by their parent."""
+    record = benchmark._isolated_case_record(
+        {
+            "run_id": "test-run",
+            "backend": "scipy",
+            "validation": "full",
+            "batch": 1,
+            "workers": 2,
+            "tasks": 2,
+            "dtype_name": "float32",
+            "seed": 320,
+            "warmup": 0,
+            "repetitions": 1,
+            "run_metadata": {"source": {"benchmark_sha256": "parent-snapshot"}},
+        }
+    )
+
+    assert record["status"] == "measured"
+    assert record["run_metadata"]["source"]["benchmark_sha256"] != "parent-snapshot"
+    assert len(record["run_metadata"]["source"]["assignment_module_sha256"]) == 64
 
 
 def test_nvidia_smi_metadata_is_explicit_when_command_is_unavailable(
@@ -1117,7 +1201,7 @@ def test_main_invalidates_every_case_in_an_allow_incomplete_run(
     assert {record["acceptance_exclusion"] for record in written} == {"diagnostic_allow_incomplete"}
 
 
-@pytest.mark.parametrize("status", ["backend_unavailable", "oom", "worker_failed"])
+@pytest.mark.parametrize("status", ["backend_unavailable", "oom", "worker_failed", "worker_timeout"])
 def test_main_exits_nonzero_for_every_incomplete_requested_case(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1227,6 +1311,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
         repetitions=1,
         output=tmp_path / "results.jsonl",
         process_rounds=1,
+        worker_timeout_seconds=37.5,
         backend_order="alternate",
         allow_incomplete=False,
         expect_package_version=None,
@@ -1248,11 +1333,14 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
     monkeypatch.setattr(benchmark, "tqdm", track_progress)
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        benchmark,
-        "_isolated_case_record",
-        lambda _specification: {"status": "measured", "acceptance_eligible": True},
-    )
+    worker_specifications: list[dict[str, object]] = []
+
+    def isolated_case_record(specification: dict[str, object]) -> dict[str, object]:
+        """Capture the main-process timeout before returning a complete test row."""
+        worker_specifications.append(specification)
+        return {"status": "measured", "acceptance_eligible": True}
+
+    monkeypatch.setattr(benchmark, "_isolated_case_record", isolated_case_record)
     monkeypatch.setattr(benchmark, "_run_metadata", dict)
     monkeypatch.setattr(benchmark, "_nvidia_smi_metadata", dict)
     monkeypatch.setattr(benchmark, "_attach_cpu_speedups", lambda _records: None)
@@ -1267,3 +1355,4 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
     assert cases[0] == (0, "scipy", "full", 1, 2, "float32")
     assert cases[-1] == (0, "triton", "off", 4, 3, "float64")
     assert options == {"desc": "Benchmark cases", "unit": "case"}
+    assert {specification["worker_timeout_seconds"] for specification in worker_specifications} == {37.5}
