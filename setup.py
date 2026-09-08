@@ -59,13 +59,21 @@ def get_long_description() -> str:
 if __name__ == "__main__":
     extension_modules = get_build_ext_modules()
     setup_kwargs: dict[str, object] = {
-        "name": "torch-linear-assignment",
-        "version": "0.1.0.rc0",
+        "name": "torch-hungarian",
+        "version": "0.1.0rc1",
         "author": "Ivan Karpukhin",
         "author_email": "karpuhini@yandex.ru",
+        "maintainer": "Jirka Borovec",
+        "maintainer_email": "j.borovec@gmail.com",
         "description": "Batched linear assignment with PyTorch and CUDA.",
         "long_description": get_long_description(),
         "long_description_content_type": "text/markdown",
+        "url": "https://github.com/Borda/torch-hungarian",
+        "project_urls": {
+            "Source": "https://github.com/Borda/torch-hungarian",
+            "Changelog": "https://github.com/Borda/torch-hungarian/blob/main/CHANGELOG.md",
+            "Upstream": "https://github.com/ivan-chai/torch-linear-assignment",
+        },
         "packages": ["torch_linear_assignment"],
         "python_requires": ">=3.10",
         "ext_modules": extension_modules,

@@ -23,6 +23,7 @@ install:
 
 install-legacy:
 	$(PYTHON) -m pip install pandas tqdm
+	$(PYTHON) -m pip uninstall -y torch-hungarian
 	$(PYTHON) -m pip install --no-build-isolation --no-deps --force-reinstall "torch-linear-assignment==0.0.6"
 	@set -e; \
 	verify_dir=$$(mktemp -d); \
@@ -41,7 +42,7 @@ benchmark:
 	benchmark_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$benchmark_dir"' EXIT; \
 	cp tests/benchmark.py "$$benchmark_dir/benchmark.py"; \
-	package_version=$$(cd "$$benchmark_dir" && $(PYTHON) -c "import importlib.metadata as m; print(m.version('torch-linear-assignment'))"); \
+	package_version=$$(cd "$$benchmark_dir" && $(PYTHON) -c "import importlib.metadata as m; installed = {d.metadata['Name']: d.version for d in m.distributions()}; print(installed.get('torch-hungarian') or installed.get('torch-linear-assignment') or '')"); \
 	if [ "$$package_version" = "0.0.6" ]; then expected_implementation=legacy_cuda; else expected_implementation=triton; fi; \
 	TLA_BENCHMARK_SOURCE_PATH="$(CURDIR)/tests/benchmark.py" \
 	TLA_BENCHMARK_GIT_REVISION="$$(git rev-parse HEAD)" \

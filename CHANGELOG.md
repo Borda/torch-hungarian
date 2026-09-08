@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0rc1 - 2026-09-08
+
+### Changed
+
+- Continue the project as the [Borda/torch-hungarian](https://github.com/Borda/torch-hungarian) fork, published on PyPI as `torch-hungarian`. Ivan Karpukhin remains the author of the original project and of the `0.0.x` compiled CUDA line; Jirka Borovec is the maintainer of this fork.
+- Keep the import name `torch_linear_assignment`, so code written against the upstream project and against `torch-hungarian==0.1.0rc0` needs no change.
+- Point the package metadata, README badges, install command, and Colab reproduction cells at the fork, and add source, changelog, and upstream project URLs.
+- Resolve the installed version from `torch-hungarian` first and from `torch-linear-assignment` second in `tests/benchmark.py` and `make benchmark`, so the fork and the frozen `0.0.6` upstream baseline are both recognized.
+- Uninstall `torch-hungarian` in `make install-legacy` before installing the `0.0.6` baseline. Both distributions provide `torch_linear_assignment`, so without this the target could report the fork's version while running the legacy backend.
+
+### Fixed
+
+- Restrict the `triton` runtime dependency to Linux `x86_64`, matching the marker PyTorch itself uses. Triton publishes no aarch64 wheel and no source distribution, so the previous Linux-wide marker made installation fail outright on ARM Linux instead of falling back to SciPy.
+- Pin `triton` in the hosted CI snapshot. The CPU-only PyTorch wheel omits the `triton` dependency that the CUDA wheel carries, so `pip check` failed on every matrix job.
+- Upload the CPU-only benchmark diagnostic only when the benchmark step actually ran, so a failing install no longer reports a second, misleading missing-artifact error.
+
 ## 0.1.0rc0 - 2026-08-20
 
 ### Added

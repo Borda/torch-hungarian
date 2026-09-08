@@ -1,6 +1,6 @@
 # Batch linear assignment for PyTorch
 
-[![PyPI version](https://badge.fury.io/py/torch-linear-assignment.svg)](https://badge.fury.io/py/torch-linear-assignment) [![Build Status](https://github.com/ivan-chai/torch-linear-assignment/actions/workflows/ci-tests.yml/badge.svg)](https://github.com/ivan-chai/torch-linear-assignment/actions) [![Downloads](https://img.shields.io/pypi/dm/torch-linear-assignment)](https://pepy.tech/project/torch-linear-assignment) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![PyPI version](https://badge.fury.io/py/torch-hungarian.svg)](https://badge.fury.io/py/torch-hungarian) [![Build Status](https://github.com/Borda/torch-hungarian/actions/workflows/ci-tests.yml/badge.svg)](https://github.com/Borda/torch-hungarian/actions) [![Downloads](https://img.shields.io/pypi/dm/torch-hungarian)](https://pepy.tech/project/torch-hungarian) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 <h4 align="left">
     <p>
@@ -26,8 +26,10 @@ The active release line is `0.1.0+`. It uses Triton on validated Linux NVIDIA GP
 Python 3.10 or newer is required. Install the `0.1.0` release candidate from PyPI:
 
 ```bash
-python -m pip install "torch-linear-assignment==0.1.0rc0"
+python -m pip install "torch-hungarian==0.1.0rc1"
 ```
+
+The distribution is named `torch-hungarian`, while the import name stays `torch_linear_assignment`. Keeping the import name means code written against the upstream project, and against `torch-hungarian==0.1.0rc0`, continues to work unchanged.
 
 No editable install, local CUDA compilation, or `--no-build-isolation` flag is needed for normal use. On Linux, the package declares Triton through a platform marker and imports it lazily only for an eligible CUDA input. macOS and Windows installs remain usable through SciPy without requiring Triton.
 
@@ -141,8 +143,8 @@ Do not publish a Triton-only timing as a speedup. Each performance report pairs 
 Run both cells on each fresh Colab GPU runtime and retain the two JSONL artifacts. The first installs the exact PyPI baseline; the second reinstalls, validates, and measures the checkout. Package and implementation expectations reject checkout shadowing or fallback execution.
 
 ```python
-!git clone https://github.com/Borda/torch-linear-assignment.git
-%cd torch-linear-assignment
+!git clone https://github.com/Borda/torch-hungarian.git
+%cd torch-hungarian
 !git checkout develop
 !git rev-parse HEAD
 !make install-legacy
@@ -151,7 +153,7 @@ Run both cells on each fresh Colab GPU runtime and retain the two JSONL artifact
 
 ```python
 !make validate
-!make benchmark BENCHMARK_ARGS="--label current-triton --expect-package-version 0.1.0rc0 --expect-implementation triton --process-rounds 5 --repetitions 30"
+!make benchmark BENCHMARK_ARGS="--label current-triton --expect-package-version 0.1.0rc1 --expect-implementation triton --process-rounds 5 --repetitions 30"
 ```
 
 Pair only matching device, shape, dtype, seed, validation mode, and timing statistic when computing `SciPy / Triton` or `legacy / Triton`. Use `make benchmark-evidence` for the bounded batch-208 validation-overhead and memory run.
@@ -227,7 +229,7 @@ Triton is faster in all 30 paired warm cases on each measured supported GPU; the
 
 ## Acknowledgments
 
-The `0.1.0+` pure-source Triton backend, GPU validation workflow, and benchmark revamp were implemented by [@Borda](https://github.com/Borda).
+The original project was written by Ivan Karpukhin and is published upstream as [ivan-chai/torch-linear-assignment](https://github.com/ivan-chai/torch-linear-assignment); the `0.0.x` compiled CUDA line remains his work. This fork continues the project as [Borda/torch-hungarian](https://github.com/Borda/torch-hungarian), maintained by [@Borda](https://github.com/Borda), who implemented the `0.1.0+` pure-source Triton backend, the GPU validation workflow, and the benchmark revamp.
 
 ## Citation
 

@@ -38,12 +38,15 @@ jobs:
       run: python -m pytest tests/
 
     - name: Run CPU-only benchmark diagnostic
+      id: benchmark
       run: >-
         python tests/benchmark.py --allow-incomplete
         --output benchmark-results-python-${{ matrix.python-version }}.jsonl
 
     - name: Upload CPU-only benchmark diagnostic
-      if: always()
+      # Keep the diagnostic when the benchmark itself fails, but do not demand an
+      # artifact from a run that never reached the benchmark step.
+      if: always() && steps.benchmark.outcome != 'skipped'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: benchmark-diagnostic-python-${{ matrix.python-version }}

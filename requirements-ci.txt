@@ -1,5 +1,8 @@
 # Reproducible hosted CPU validation snapshot. Runtime support bounds remain in requirements.txt.
 torch==2.8.0
+# The CPU torch wheel drops the triton dependency the CUDA wheel carries, so pin it
+# explicitly to keep pip check honest about the declared Linux runtime dependency.
+triton==3.4.0; platform_system == "Linux" and platform_machine == "x86_64"
 scipy==1.15.3
 numpy==2.2.6
 pandas==2.3.3
