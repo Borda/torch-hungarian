@@ -77,7 +77,7 @@ def _arguments() -> argparse.Namespace:
         "--backends",
         type=_csv_values,
         default=["scipy", "public_cuda"],
-        help="comma-separated: scipy,public_cuda,legacy_cuda,triton",
+        help="comma-separated: scipy,public_cuda,triton",
     )
     parser.add_argument("--workers", type=int, default=300)
     parser.add_argument("--tasks", type=_integer_csv, default=[100, 300, 600])
@@ -137,7 +137,6 @@ def _arguments() -> argparse.Namespace:
     unknown_backends = set(arguments.backends) - {
         "scipy",
         "public_cuda",
-        "legacy_cuda",
         "triton",
     }
     unknown_dtypes = set(arguments.dtypes) - _DTYPES.keys()
@@ -329,18 +328,13 @@ def _backend_callable(
     backend: str,
     validation: str,
 ) -> Callable[[torch.Tensor], torch.Tensor] | None:
-    """Resolve a public backend or an explicitly requested private comparison adapter."""
+    """Resolve the public entry point, the SciPy oracle, or the private Triton adapter."""
     if backend == "scipy":
         return _scipy_oracle
     if backend == "public_cuda":
         return batch_linear_assignment
 
     assignment_module = importlib.import_module("torch_linear_assignment.assignment")
-    if backend == "legacy_cuda":
-        legacy_backend = getattr(assignment_module, "_batch_linear_assignment_cuda_legacy", None)
-        legacy_loader = getattr(assignment_module, "_load_legacy_backend", None)
-        return legacy_backend if legacy_loader is not None and legacy_loader() is not None else None
-
     triton_loader = getattr(assignment_module, "_load_triton_backend", None)
     if triton_loader is None:
         return None
@@ -960,8 +954,7 @@ def _case_record(
             "samples_required": cold_samples_required,
         },
         "parity": {"oracle": "scipy_promoted", "exact": True},
-        "acceptance_eligible": backend in {"public_cuda", "legacy_cuda", "triton"}
-        and implementation in {"triton", "legacy_cuda"},
+        "acceptance_eligible": backend in {"public_cuda", "triton"} and implementation in {"triton", "legacy_cuda"},
         "exclusions": [
             "GPU driver and hardware state are observed but not reset between case processes",
             "logical workspace accounting is unavailable",

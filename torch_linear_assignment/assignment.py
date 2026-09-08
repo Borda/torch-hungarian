@@ -51,16 +51,6 @@ def _load_triton_backend() -> ModuleType | None:
         raise
 
 
-def _load_legacy_backend() -> ModuleType | None:
-    """Load the optional legacy extension for private benchmark comparisons only."""
-    try:
-        return importlib.import_module("torch_linear_assignment._backend")
-    except ModuleNotFoundError as error:
-        if error.name == "torch_linear_assignment._backend":
-            return None
-        raise
-
-
 def _cuda_uses_triton(cost: torch.Tensor) -> bool:
     """Return whether this CUDA cost tensor can use the supported Triton path."""
     if (
@@ -84,21 +74,6 @@ def _warn_cuda_fallback() -> None:
         RuntimeWarning,
         stacklevel=3,
     )
-
-
-def _batch_linear_assignment_cuda_legacy(cost: torch.Tensor) -> torch.Tensor:
-    """Run the legacy extension for private benchmark comparison when installed."""
-    backend = _load_legacy_backend()
-    if backend is None:
-        raise RuntimeError("The legacy CUDA extension is not installed.")
-
-    cost = _prepare_solver_cost(cost)
-    _, workers, tasks = cost.shape
-    if tasks < workers:
-        _, row4col = backend.batch_linear_assignment(cost.transpose(1, 2).contiguous())
-        return row4col.long()
-    col4row, _ = backend.batch_linear_assignment(cost.contiguous())
-    return col4row.long()
 
 
 def batch_linear_assignment_cuda(cost: torch.Tensor) -> torch.Tensor:

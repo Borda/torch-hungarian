@@ -31,8 +31,6 @@ def test_benchmark_import_requires_only_public_package_api(monkeypatch: pytest.M
     import torch_linear_assignment.assignment as assignment_module
 
     for name in (
-        "_batch_linear_assignment_cuda_legacy",
-        "_load_legacy_backend",
         "_load_triton_backend",
         "batch_linear_assignment_cpu",
     ):
