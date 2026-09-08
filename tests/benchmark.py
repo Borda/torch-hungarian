@@ -1,11 +1,10 @@
 """Benchmark SciPy CPU and installed CUDA backends with exact-parity gates.
 
 The script saves lossless JSON Lines and prints a compact human-readable table.
-This keeps GPU evidence attachable to a pull request without merging
-measurements across devices. A no-CUDA host emits one ``gpu_skipped`` record
-and exits successfully; that record is diagnostic and never
-performance-acceptance evidence. Any solver mismatch emits replayable
-diagnostics and makes the process exit unsuccessfully.
+Each requested case runs in fresh processes so cold compilation, warm latency,
+and allocation boundaries remain auditable without merging devices. Missing
+GPU evidence, incomplete process rounds, and solver mismatches fail closed;
+``--allow-incomplete`` is an explicit diagnostic-only escape hatch.
 """
 
 import argparse
@@ -15,19 +14,27 @@ import importlib.metadata
 import importlib.util
 import json
 import math
+import os
 import platform
 import statistics
+import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
+import scipy
 import torch
 from scipy.optimize import linear_sum_assignment
 from tqdm.auto import tqdm
 
 from torch_linear_assignment import batch_linear_assignment
+
+_WORKER_RECORD_PREFIX = "__TLA_BENCHMARK_RECORD__="
 
 _DTYPES = {
     "float16": torch.float16,
@@ -35,6 +42,13 @@ _DTYPES = {
     "float32": torch.float32,
     "float64": torch.float64,
 }
+
+_VALIDATION_MODES = (
+    "off",
+    "nonfinite_only",
+    "infeasibility_flag_only",
+    "full",
+)
 
 
 def _csv_values(value: str) -> list[str]:
@@ -79,13 +93,40 @@ def _arguments() -> argparse.Namespace:
         default=["full", "off", "nonfinite_only", "infeasibility_flag_only"],
         help="private Triton validation modes; other backends use full only",
     )
-    parser.add_argument("--seed", type=int, default=32)
+    parser.add_argument("--seed", type=int, default=320)
     parser.add_argument(
         "--label",
         help="optional label identifying the installed package or comparison run",
     )
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repetitions", type=int, default=10)
+    parser.add_argument(
+        "--process-rounds",
+        type=int,
+        default=3,
+        help="fresh-process repetitions; alternate rounds reverse backend order",
+    )
+    parser.add_argument(
+        "--backend-order",
+        choices=("alternate", "forward", "reverse"),
+        default="alternate",
+        help="case-local backend order; alternate reverses every process round",
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="exit successfully with unavailable/OOM/skip rows for diagnostic runs only",
+    )
+    parser.add_argument(
+        "--expect-package-version",
+        help="fail unless every case reports this installed distribution version",
+    )
+    parser.add_argument(
+        "--expect-implementation",
+        choices=("triton", "legacy_cuda", "scipy_fallback"),
+        help="fail unless every measured non-SciPy row executes this implementation",
+    )
+    parser.add_argument("--worker-case", help=argparse.SUPPRESS)
     parser.add_argument(
         "--output",
         type=Path,
@@ -100,12 +141,15 @@ def _arguments() -> argparse.Namespace:
         "triton",
     }
     unknown_dtypes = set(arguments.dtypes) - _DTYPES.keys()
+    unknown_validation_modes = set(arguments.validation_modes) - set(_VALIDATION_MODES)
     if unknown_backends:
         parser.error(f"unknown backends: {sorted(unknown_backends)}")
     if unknown_dtypes:
         parser.error(f"unknown dtypes: {sorted(unknown_dtypes)}")
-    if arguments.workers <= 0 or arguments.warmup < 0 or arguments.repetitions <= 0:
-        parser.error("workers/repetitions must be positive and warmup non-negative")
+    if unknown_validation_modes:
+        parser.error(f"unknown validation modes: {sorted(unknown_validation_modes)}")
+    if arguments.workers <= 0 or arguments.warmup < 0 or arguments.repetitions <= 0 or arguments.process_rounds <= 0:
+        parser.error("workers/repetitions/process-rounds must be positive and warmup non-negative")
     return arguments
 
 
@@ -125,6 +169,95 @@ def _versions() -> dict[str, str | None]:
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "triton": triton_version,
+        "scipy": scipy.__version__,
+        "numpy": np.__version__,
+    }
+
+
+def _cpu_model() -> str:
+    """Return the most specific locally available CPU model string."""
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    return platform.processor() or platform.machine()
+
+
+def _nvidia_smi_metadata() -> dict[str, Any]:
+    """Capture best-effort driver, clock, power, and temperature state."""
+    query = "driver_version,name,pci.bus_id,clocks.sm,clocks.mem,power.draw,temperature.gpu"
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return {"status": "unavailable", "reason": "nvidia-smi executable not found"}
+    except subprocess.TimeoutExpired:
+        return {"status": "unavailable", "reason": "nvidia-smi timed out"}
+    if completed.returncode != 0:
+        return {
+            "status": "unavailable",
+            "reason": completed.stderr.strip() or f"nvidia-smi exited {completed.returncode}",
+        }
+    fields = ("driver_version", "name", "pci_bus_id", "sm_clock_mhz", "memory_clock_mhz", "power_w", "temperature_c")
+    devices = [
+        dict(zip(fields, (value.strip() for value in line.split(",")), strict=True))
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+    return {"status": "measured", "devices": devices}
+
+
+def _source_metadata() -> dict[str, str | None]:
+    """Bind evidence to the benchmark source and installed package origin."""
+    execution_path = Path(__file__).resolve()
+    script_path = Path(os.environ.get("TLA_BENCHMARK_SOURCE_PATH", execution_path)).resolve()
+    package_module = importlib.import_module("torch_linear_assignment")
+    package_origin = getattr(package_module, "__file__", None)
+    package_path = Path(package_origin).resolve() if package_origin else None
+    revision = os.environ.get("TLA_BENCHMARK_GIT_REVISION")
+    if revision is None:
+        try:
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                check=True,
+                cwd=script_path.parent.parent,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            revision = None
+    return {
+        "benchmark_path": str(script_path),
+        "benchmark_execution_path": str(execution_path),
+        "benchmark_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest(),
+        "benchmark_git_revision": revision,
+        "package_module_origin": str(package_path) if package_path else None,
+        "package_module_sha256": (
+            hashlib.sha256(package_path.read_bytes()).hexdigest()
+            if package_path is not None and package_path.is_file()
+            else None
+        ),
+    }
+
+
+def _run_metadata() -> dict[str, Any]:
+    """Capture run-level provenance once so telemetry does not perturb every case."""
+    return {
+        "source": _source_metadata(),
+        "system": {
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "cpu_model": _cpu_model(),
+        },
+        "versions": _versions(),
+        "gpu_state_start": _nvidia_smi_metadata(),
     }
 
 
@@ -140,17 +273,34 @@ def _device_metadata(device: torch.device) -> dict[str, str]:
     }
 
 
-def _backend_implementation(backend: str, device: torch.device) -> str:
-    """Name the implementation selected by a benchmark backend on this device."""
+def _backend_implementation(backend: str, _device: torch.device) -> str:
+    """Name the implementation observed after the measured public call."""
     if backend != "public_cuda":
         return backend
 
-    has_triton = importlib.util.find_spec("torch_linear_assignment._triton") is not None
-    if has_triton:
-        return "triton" if torch.cuda.get_device_capability(device) >= (8, 0) else "scipy_fallback"
-    if importlib.util.find_spec("torch_linear_assignment._backend") is not None:
+    if "torch_linear_assignment._triton" in sys.modules:
+        return "triton"
+    if "torch_linear_assignment._backend" in sys.modules:
         return "legacy_cuda"
     return "scipy_fallback"
+
+
+def _implementation_metadata(implementation: str) -> dict[str, str | None]:
+    """Identify and hash the loaded module that executed the GPU implementation."""
+    module_name = {
+        "triton": "torch_linear_assignment._triton",
+        "legacy_cuda": "torch_linear_assignment._backend",
+    }.get(implementation)
+    module = sys.modules.get(module_name) if module_name else None
+    origin_value = getattr(module, "__file__", None)
+    origin = Path(origin_value).resolve() if origin_value else None
+    return {
+        "module": module_name,
+        "origin": str(origin) if origin else None,
+        "sha256": (
+            hashlib.sha256(origin.read_bytes()).hexdigest() if origin is not None and origin.is_file() else None
+        ),
+    }
 
 
 def _solver_dtype_name(input_dtype: torch.dtype) -> str:
@@ -211,6 +361,45 @@ def _time_call(
         torch.cuda.synchronize(cost.device)
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     return elapsed_ms, result
+
+
+def _start_memory_boundary(cost: torch.Tensor) -> dict[str, int | str | None]:
+    """Reset CUDA peak statistics immediately before one measured allocation boundary."""
+    if not cost.is_cuda:
+        return {
+            "status": "not_cuda",
+            "allocated_before_bytes": None,
+            "allocated_after_bytes": None,
+            "peak_allocated_bytes": None,
+            "peak_allocated_delta_bytes": None,
+        }
+    torch.cuda.reset_peak_memory_stats(cost.device)
+    return {
+        "status": "measured",
+        "allocated_before_bytes": torch.cuda.memory_allocated(cost.device),
+        "allocated_after_bytes": None,
+        "peak_allocated_bytes": None,
+        "peak_allocated_delta_bytes": None,
+    }
+
+
+def _finish_memory_boundary(
+    cost: torch.Tensor,
+    boundary: dict[str, int | str | None],
+) -> dict[str, int | str | None]:
+    """Complete one CUDA allocation boundary after synchronized measured work."""
+    if not cost.is_cuda:
+        return boundary
+    allocated_after = torch.cuda.memory_allocated(cost.device)
+    peak_allocated = torch.cuda.max_memory_allocated(cost.device)
+    allocated_before = boundary["allocated_before_bytes"]
+    assert isinstance(allocated_before, int)
+    return {
+        **boundary,
+        "allocated_after_bytes": allocated_after,
+        "peak_allocated_bytes": peak_allocated,
+        "peak_allocated_delta_bytes": peak_allocated - allocated_before,
+    }
 
 
 def _nearest_rank_p95(samples: list[float]) -> float:
@@ -370,6 +559,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         "cold ms",
         "CPU/GPU warm",
         "exact parity",
+        "round",
     ]
     rows = []
     for record in records:
@@ -392,6 +582,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
                 f"{cold:.1f}" if cold is not None else "-",
                 f"{speedup:.1f}x" if speedup is not None else "-",
                 "yes" if parity is True else "no" if parity is False else "-",
+                str(record.get("process_round", "-")),
             ]
         )
 
@@ -422,7 +613,7 @@ def _status_record(
     }
 
 
-def _case_key(record: dict[str, Any]) -> tuple[int, int, int, str, int] | None:
+def _case_key(record: dict[str, Any]) -> tuple[int, int, int, str, tuple[int, int]] | None:
     """Return the deterministic input identity used to pair CPU and CUDA measurements."""
     shape = record.get("shape", {})
     required = ("batch", "workers", "tasks")
@@ -435,8 +626,76 @@ def _case_key(record: dict[str, Any]) -> tuple[int, int, int, str, int] | None:
         shape["workers"],
         shape["tasks"],
         record["input_dtype"],
-        record["seed"],
+        (record["seed"], record.get("process_round", 0)),
     )
+
+
+def _attach_process_statistics(records: list[dict[str, Any]], required_rounds: int) -> None:
+    """Aggregate cold and warm timing across the required fresh-process rounds."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for record in records:
+        shape = record.get("shape", {})
+        required_shape = ("batch", "workers", "tasks")
+        if record.get("status") != "measured" or any(name not in shape for name in required_shape):
+            continue
+        key = (
+            record.get("backend"),
+            record.get("implementation"),
+            record.get("validation_mode"),
+            shape["batch"],
+            shape["workers"],
+            shape["tasks"],
+            record.get("input_dtype"),
+            record.get("seed"),
+            record.get("input_sha256"),
+        )
+        groups.setdefault(key, []).append(record)
+
+    for group in groups.values():
+        implementation = group[0].get("implementation")
+        rounds = sorted(record["process_round"] for record in group)
+        input_hashes = {record.get("input_sha256") for record in group}
+        cold_samples = [record["timing"]["cold_first_call_ms"] for record in group]
+        warm_samples = [record["timing"]["warm_ms"]["median"] for record in group]
+        isolated = all(record.get("process_isolated", False) for record in group)
+        complete = rounds == list(range(required_rounds)) and len(input_hashes) == 1 and isolated
+        process_statistics = {
+            "status": "measured" if complete else "incomplete",
+            "rounds": rounds,
+            "required_rounds": required_rounds,
+            "input_sha256": next(iter(input_hashes)) if len(input_hashes) == 1 else None,
+            "cold_first_call_ms": {
+                "samples": cold_samples,
+                "median": statistics.median(cold_samples),
+                "p95": _nearest_rank_p95(cold_samples),
+            },
+            "warm_median_ms": {
+                "samples": warm_samples,
+                "median": statistics.median(warm_samples),
+                "p95": _nearest_rank_p95(warm_samples),
+            },
+        }
+        cold_compilation = {
+            "status": process_statistics["status"],
+            "definition": (
+                "fresh_process_first_scipy_solver_call_after_package_import_and_input_setup"
+                if group[0].get("backend") == "scipy"
+                else "fresh_process_first_public_solver_call_after_package_import_cuda_context_and_device_input_setup"
+            ),
+            "samples_required": required_rounds,
+            "n": len(cold_samples),
+            "samples_ms": cold_samples,
+            "median_ms": statistics.median(cold_samples),
+            "p95_ms": _nearest_rank_p95(cold_samples),
+            "quantile": "nearest_rank",
+            "fresh_process": isolated,
+            "cache_policy": ("empty_unique_triton_cache" if implementation == "triton" else "not_applicable"),
+        }
+        for record in group:
+            record["process_statistics"] = process_statistics
+            record["cold_compilation"] = cold_compilation
+            if not complete:
+                record["acceptance_eligible"] = False
 
 
 def _attach_cpu_speedups(records: list[dict[str, Any]]) -> None:
@@ -463,6 +722,58 @@ def _attach_cpu_speedups(records: list[dict[str, Any]]) -> None:
         }
 
 
+def _validation_group_key(record: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Return the identity shared by validation-mode measurements of one input."""
+    case_key = _case_key(record)
+    if case_key is None or record.get("backend") != "triton":
+        return None
+    return (*case_key, record.get("input_sha256"))
+
+
+def _attach_validation_overheads(records: list[dict[str, Any]]) -> None:
+    """Attach full four-mode validation overheads without mixing inputs or rounds."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for record in records:
+        key = _validation_group_key(record)
+        if key is not None:
+            groups.setdefault(key, []).append(record)
+
+    required = set(_VALIDATION_MODES)
+    for group in groups.values():
+        measured = {record["validation_mode"]: record for record in group if record.get("status") == "measured"}
+        observed = set(measured)
+        digests = {record.get("input_sha256") for record in group}
+        if observed != required or len(digests) != 1:
+            overhead: dict[str, Any] = {
+                "status": "incomplete",
+                "required_modes": list(_VALIDATION_MODES),
+                "observed_modes": sorted(observed),
+                "input_sha256": next(iter(digests)) if len(digests) == 1 else None,
+            }
+            for record in group:
+                record["validation_overhead"] = overhead
+                record["acceptance_eligible"] = False
+            continue
+
+        medians = {mode: measured[mode]["timing"]["warm_ms"]["median"] for mode in _VALIDATION_MODES}
+        baseline = medians["off"]
+        absolute = {mode: medians[mode] - baseline for mode in _VALIDATION_MODES[1:]}
+        percent = {mode: value / baseline * 100.0 if baseline else None for mode, value in absolute.items()}
+        interaction = medians["full"] - medians["nonfinite_only"] - medians["infeasibility_flag_only"] + baseline
+        overhead = {
+            "status": "measured",
+            "baseline_mode": "off",
+            "input_sha256": next(iter(digests)),
+            "warm_median_ms": medians,
+            "absolute_vs_off_ms": absolute,
+            "percent_vs_off": percent,
+            "interaction_ms": interaction,
+            "interaction_percent_vs_off": interaction / baseline * 100.0 if baseline else None,
+        }
+        for record in group:
+            record["validation_overhead"] = overhead
+
+
 def _case_record(
     *,
     run_id: str,
@@ -476,24 +787,54 @@ def _case_record(
     warmup: int,
     repetitions: int,
     run_label: str | None = None,
+    process_round: int = 0,
+    process_isolated: bool = False,
+    cold_cache_policy: str | None = None,
+    cold_samples_required: int = 1,
+    run_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Measure one backend/workload pair after enforcing exact SciPy parity."""
+    """Measure one backend/workload pair and validate every solver result."""
     dtype = _DTYPES[dtype_name]
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    cpu_cost = torch.randn((batch, workers, tasks), generator=generator).to(dtype)
-    oracle = _scipy_oracle(cpu_cost)
+    cpu_cost = torch.randn((batch, workers, tasks), generator=generator, dtype=dtype)
     operation = _backend_callable(backend, validation)
     benchmark_cost = cpu_cost if backend == "scipy" else cpu_cost.cuda()
+    included_work = [
+        "backend adapter invocation",
+        "solver workspace allocation",
+        "solver execution",
+        "result construction and conversion",
+    ]
+    excluded_work = [
+        "benchmark and backend imports",
+        "input generation",
+        "SciPy oracle construction",
+        "post-timing parity diagnostics",
+    ]
+    if benchmark_cost.is_cuda:
+        included_work.append("CUDA completion synchronization")
+        excluded_work.extend(["CUDA context creation", "host-to-device input transfer"])
+    provenance = run_metadata or {
+        "source": _source_metadata(),
+        "system": {
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "cpu_model": _cpu_model(),
+        },
+        "versions": _versions(),
+    }
     base = {
         "schema_version": 1,
         "record_type": "case",
         "run_id": run_id,
         "run_label": run_label,
+        "process_round": process_round,
+        "process_isolated": process_isolated,
         "backend": backend,
-        "implementation": _backend_implementation(backend, benchmark_cost.device),
         "validation_mode": validation,
         "device": _device_metadata(benchmark_cost.device),
         "versions": _versions(),
+        "run_metadata": provenance,
         "shape": {
             "batch": batch,
             "workers": workers,
@@ -503,17 +844,35 @@ def _case_record(
         "input_dtype": dtype_name,
         "solver_dtype": _solver_dtype_name(dtype),
         "seed": seed,
+        "input_sha256": hashlib.sha256(memoryview(cpu_cost.contiguous().view(torch.uint8).numpy())).hexdigest(),
+        "measurement_scope": {
+            "kind": "cpu_solver_latency" if backend == "scipy" else "device_resident_solver_latency",
+            "included": included_work,
+            "excluded": excluded_work,
+        },
     }
     if operation is None:
+        implementation = _backend_implementation(backend, benchmark_cost.device)
         return {
             **base,
+            "implementation": implementation,
+            "implementation_source": _implementation_metadata(implementation),
             "status": "backend_unavailable",
             "acceptance_eligible": False,
         }
 
-    torch.cuda.reset_peak_memory_stats() if benchmark_cost.is_cuda else None
-    memory_before = torch.cuda.memory_allocated(benchmark_cost.device) if benchmark_cost.is_cuda else 0
+    cold_memory = _start_memory_boundary(benchmark_cost)
     cold_ms, result = _time_call(operation, benchmark_cost)
+    cold_memory = _finish_memory_boundary(benchmark_cost, cold_memory)
+    implementation = _backend_implementation(backend, benchmark_cost.device)
+    base["implementation"] = implementation
+    base["implementation_source"] = _implementation_metadata(implementation)
+    if implementation == "triton":
+        base["measurement_scope"]["included"].append("solver validation")
+
+    # Construct the oracle only after the first timed public solver call. This
+    # preserves a symmetric first-call boundary while still rejecting its result.
+    oracle = _scipy_oracle(cpu_cost)
     failure = _parity_failure_record(
         base=base,
         cost=cpu_cost,
@@ -538,6 +897,10 @@ def _case_record(
         if failure is not None:
             return failure
 
+    # Release the prior output before measuring a steady-state call. Otherwise
+    # replacing ``result`` briefly counts two output tensors in the warm peak.
+    del result
+    warm_memory = _start_memory_boundary(benchmark_cost)
     samples = []
     for index in range(repetitions):
         elapsed_ms, result = _time_call(operation, benchmark_cost)
@@ -552,33 +915,50 @@ def _case_record(
         if failure is not None:
             return failure
         samples.append(elapsed_ms)
-    peak_delta = (
-        torch.cuda.max_memory_allocated(benchmark_cost.device) - memory_before if benchmark_cost.is_cuda else None
+        del result
+    warm_memory = _finish_memory_boundary(benchmark_cost, warm_memory)
+    cold_definition = (
+        "fresh_process_first_scipy_solver_call_after_package_import_and_input_setup"
+        if backend == "scipy"
+        else "fresh_process_first_public_solver_call_after_package_import_cuda_context_and_device_input_setup"
     )
+    effective_cache_policy = cold_cache_policy if implementation == "triton" else "not_applicable"
     return {
         **base,
         "status": "measured",
         "timing": {
             "cold_first_call_ms": cold_ms,
-            "cold_method": "process_first_solver_call_includes_jit_load_execution_excludes_import",
+            "cold_method": (cold_definition if process_isolated else "current_process_first_timed_public_solver_call"),
             "warm_ms": {
                 "n": repetitions,
                 "warmup": warmup,
                 "median": statistics.median(samples),
                 "p95": _nearest_rank_p95(samples),
+                "samples": samples,
                 "quantile": "nearest_rank",
                 "timer": "wall_clock_plus_cuda_sync",
             },
         },
         "memory": {
-            "peak_allocated_delta_bytes": peak_delta,
+            "cold": cold_memory,
+            "warm": warm_memory,
             "logical_workspace_bytes": None,
             "workspace_source": "unavailable",
         },
+        "cold_compilation": {
+            "status": "measured" if process_isolated else "not_isolated",
+            "definition": cold_definition,
+            "cache_policy": effective_cache_policy,
+            "cache_directory": (
+                os.environ.get("TRITON_CACHE_DIR") if process_isolated and implementation == "triton" else None
+            ),
+            "samples_required": cold_samples_required,
+        },
         "parity": {"oracle": "scipy_promoted", "exact": True},
-        "acceptance_eligible": backend in {"public_cuda", "legacy_cuda", "triton"},
+        "acceptance_eligible": backend in {"public_cuda", "legacy_cuda", "triton"}
+        and implementation in {"triton", "legacy_cuda"},
         "exclusions": [
-            "cold timing is not isolated from process or driver caches",
+            "GPU driver and hardware state are observed but not reset between case processes",
             "logical workspace accounting is unavailable",
         ],
     }
@@ -589,66 +969,205 @@ def _validation_modes(backend: str, requested: Iterable[str]) -> list[str]:
     return list(requested) if backend == "triton" else ["full"]
 
 
+def _case_matrix(arguments: argparse.Namespace) -> list[tuple[int, str, str, int, int, str]]:
+    """Interleave comparable backends and reverse order across process rounds."""
+    cases = []
+    for process_round in range(arguments.process_rounds):
+        backends = list(arguments.backends)
+        if arguments.backend_order == "reverse" or (arguments.backend_order == "alternate" and process_round % 2):
+            backends.reverse()
+        for batch in arguments.batches:
+            for tasks in arguments.tasks:
+                for dtype_name in arguments.dtypes:
+                    for backend in backends:
+                        for validation in _validation_modes(backend, arguments.validation_modes):
+                            cases.append((process_round, backend, validation, batch, tasks, dtype_name))
+    return cases
+
+
+def _case_status_record(specification: dict[str, Any], status: str, detail: str | None = None) -> dict[str, Any]:
+    """Build an auditable non-measurement row for one requested case."""
+    record = {
+        **_status_record(status, specification["run_id"], specification.get("run_label")),
+        "record_type": "case",
+        "process_round": specification.get("process_round", 0),
+        "backend": specification["backend"],
+        "validation_mode": specification["validation"],
+        "shape": {
+            "batch": specification["batch"],
+            "workers": specification["workers"],
+            "tasks": specification["tasks"],
+        },
+        "input_dtype": specification["dtype_name"],
+        "seed": specification["seed"],
+        "run_metadata": specification.get("run_metadata"),
+    }
+    if detail:
+        record["detail"] = detail
+    return record
+
+
+def _worker_case_record(specification: dict[str, Any]) -> dict[str, Any]:
+    """Execute one isolated case while converting expected memory failures to evidence."""
+    try:
+        return _case_record(**specification)
+    except (torch.OutOfMemoryError, MemoryError) as error:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return _case_status_record(specification, "oom", str(error))
+
+
+def _isolated_case_record(specification: dict[str, Any]) -> dict[str, Any]:
+    """Run one backend/case in a fresh interpreter and recover its JSON record."""
+    worker_specification = {
+        **specification,
+        "process_isolated": True,
+        "cold_cache_policy": "empty_unique_triton_cache",
+    }
+    with tempfile.TemporaryDirectory(prefix="tla-triton-cache-") as cache_directory:
+        environment = os.environ.copy()
+        environment["TRITON_CACHE_DIR"] = cache_directory
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--worker-case",
+                json.dumps(worker_specification),
+            ],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"worker exited {completed.returncode}"
+        return _case_status_record(specification, "worker_failed", detail[-4000:])
+    for line in reversed(completed.stdout.splitlines()):
+        if line.startswith(_WORKER_RECORD_PREFIX):
+            return json.loads(line.removeprefix(_WORKER_RECORD_PREFIX))
+    detail = completed.stderr.strip() or completed.stdout.strip() or f"worker exited {completed.returncode}"
+    return _case_status_record(specification, "worker_failed", detail[-4000:])
+
+
+def _identity_failures(records: list[dict[str, Any]], arguments: argparse.Namespace) -> list[str]:
+    """Return explicit package or backend identity expectation failures."""
+    failures = []
+    expected_package = getattr(arguments, "expect_package_version", None)
+    if expected_package:
+        observed = sorted(
+            {record.get("versions", {}).get("package") for record in records if record.get("record_type") == "case"},
+            key=str,
+        )
+        if observed != [expected_package]:
+            failures.append(f"expected package {expected_package}, observed {observed}")
+    expected_implementation = getattr(arguments, "expect_implementation", None)
+    if expected_implementation:
+        observed = sorted(
+            {
+                record.get("implementation")
+                for record in records
+                if record.get("backend") != "scipy" and record.get("status") == "measured"
+            },
+            key=str,
+        )
+        if observed != [expected_implementation]:
+            failures.append(f"expected implementation {expected_implementation}, observed {observed}")
+    return failures
+
+
+def _case_is_complete(record: dict[str, Any]) -> bool:
+    """Return whether a requested case produced publishable measurement evidence."""
+    if record.get("status") != "measured":
+        return False
+    validation_overhead = record.get("validation_overhead")
+    if validation_overhead is not None and validation_overhead.get("status") != "measured":
+        return False
+    process_statistics = record.get("process_statistics")
+    if process_statistics is not None and process_statistics.get("status") != "measured":
+        return False
+    cold_compilation = record.get("cold_compilation")
+    if cold_compilation is not None and cold_compilation.get("status") != "measured":
+        return False
+    return record.get("backend") == "scipy" or record.get("acceptance_eligible") is True
+
+
 def main() -> None:
     """Run the configured matrix and emit structured evidence or skip rows."""
     arguments = _arguments()
+    worker_case = getattr(arguments, "worker_case", None)
+    if worker_case:
+        record = _worker_case_record(json.loads(worker_case))
+        print(f"{_WORKER_RECORD_PREFIX}{json.dumps(record, sort_keys=True)}", flush=True)
+        return
+
     run_id = time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime())
     output = _output_path(arguments.output, run_id)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.unlink(missing_ok=True)
-    records = []
-    if not torch.cuda.is_available():
+    records: list[dict[str, Any]] = []
+    run_metadata = _run_metadata()
+    requires_cuda = any(backend != "scipy" for backend in getattr(arguments, "backends", ("public_cuda",)))
+    if requires_cuda and not torch.cuda.is_available():
         record = _status_record("gpu_skipped", run_id, getattr(arguments, "label", None))
+        record["run_metadata"] = {
+            **run_metadata,
+            "gpu_state_end": _nvidia_smi_metadata(),
+        }
         records.append(record)
         _emit(record, output)
         _print_summary(records, output)
+        if not getattr(arguments, "allow_incomplete", False):
+            raise SystemExit(1)
         return
 
-    cases = [
-        (backend, validation, batch, tasks, dtype_name)
-        for backend in arguments.backends
-        for validation in _validation_modes(backend, arguments.validation_modes)
-        for batch in arguments.batches
-        for tasks in arguments.tasks
-        for dtype_name in arguments.dtypes
-    ]
-    parity_failed = False
-    for backend, validation, batch, tasks, dtype_name in tqdm(cases, desc="Benchmark cases", unit="case"):
-        try:
-            record = _case_record(
-                run_id=run_id,
-                backend=backend,
-                validation=validation,
-                batch=batch,
-                workers=arguments.workers,
-                tasks=tasks,
-                dtype_name=dtype_name,
-                seed=arguments.seed,
-                warmup=arguments.warmup,
-                repetitions=arguments.repetitions,
-                run_label=getattr(arguments, "label", None),
-            )
-        except (torch.OutOfMemoryError, MemoryError):
-            torch.cuda.empty_cache()
-            record = {
-                **_status_record("oom", run_id, getattr(arguments, "label", None)),
-                "backend": backend,
-                "validation_mode": validation,
-                "shape": {
-                    "batch": batch,
-                    "workers": arguments.workers,
-                    "tasks": tasks,
-                },
-                "input_dtype": dtype_name,
-            }
+    cases = _case_matrix(arguments)
+    for process_round, backend, validation, batch, tasks, dtype_name in tqdm(
+        cases, desc="Benchmark cases", unit="case"
+    ):
+        specification = {
+            "run_id": run_id,
+            "backend": backend,
+            "validation": validation,
+            "batch": batch,
+            "workers": arguments.workers,
+            "tasks": tasks,
+            "dtype_name": dtype_name,
+            "seed": arguments.seed,
+            "warmup": arguments.warmup,
+            "repetitions": arguments.repetitions,
+            "run_label": getattr(arguments, "label", None),
+            "process_round": process_round,
+            "cold_samples_required": arguments.process_rounds,
+            "run_metadata": run_metadata,
+        }
+        record = _isolated_case_record(specification)
         records.append(record)
-        parity_failed |= record["status"] == "parity_failed"
 
+    gpu_state_end = _nvidia_smi_metadata()
+    for record in records:
+        record.setdefault("run_metadata", run_metadata)["gpu_state_end"] = gpu_state_end
     _attach_cpu_speedups(records)
+    _attach_validation_overheads(records)
+    _attach_process_statistics(records, arguments.process_rounds)
+    case_records = list(records)
+    incomplete = any(not _case_is_complete(record) for record in case_records)
+    if arguments.allow_incomplete:
+        for record in case_records:
+            record["acceptance_eligible"] = False
+            record["acceptance_exclusion"] = "diagnostic_allow_incomplete"
+    identity_failures = _identity_failures(records, arguments)
+    if identity_failures:
+        records.append(
+            {
+                **_status_record("identity_failed", run_id, getattr(arguments, "label", None)),
+                "details": identity_failures,
+                "run_metadata": {**run_metadata, "gpu_state_end": gpu_state_end},
+            }
+        )
     for record in records:
         _emit(record, output)
     _print_summary(records, output)
-    if parity_failed:
+    if identity_failures or (incomplete and not getattr(arguments, "allow_incomplete", False)):
         raise SystemExit(1)
 
 
