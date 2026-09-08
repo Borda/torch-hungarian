@@ -92,9 +92,21 @@ GPU validation is author-run rather than hosted CI. The validation targets are L
 ```bash
 make validate   # correctness once; prints GPU metadata when available
 make benchmark  # SciPy CPU and installed public CUDA; writes JSONL and a cold/warm table
+make validate-gpu-multi  # strict two-device compiled-kernel acceptance
+make benchmark-evidence  # validation overhead, memory, and isolated cold compilation
 ```
 
 `make validate` prints Python/platform, Torch/CUDA, Triton, and GPU compute capability metadata when a CUDA device is visible. `make benchmark` separately measures the SciPy CPU reference and installed public CUDA backend, writes complete JSONL evidence, and prints a compact cold/warm table. A clean GPU metadata skip on macOS or a machine without CUDA is expected, but is not GPU evidence.
+
+`make validate-gpu-multi` is fail-closed: it requires Linux, CUDA-enabled Torch 2.4 or newer, Triton, and at least two visible NVIDIA GPUs with compute capability 8.0 or newer. It prints every visible GPU and runs a compiled test with distinct inputs and non-default streams on two devices. A skipped ordinary pytest run does not satisfy this gate.
+
+`make benchmark-evidence` runs the three primary batch-208 orientations in five fresh processes per validation mode. Each Triton worker receives a unique empty Triton cache, initializes CUDA, and transfers its input before timing. JSONL records retain the first solver call, raw warm samples, exact parity, and separate cold and warm CUDA allocation boundaries. Paired `off`, `nonfinite_only`, `infeasibility_flag_only`, and `full` records include absolute and percentage overhead versus `off` plus the interaction between the two validation checks. Missing modes, process rounds, backend execution, or GPU evidence make the command fail unless `--allow-incomplete` is explicitly used for diagnostics.
+
+`make benchmark` is fail-closed by default. Missing GPU/backend execution, OOM, worker failure, identity mismatch, incomplete process rounds, and parity failure all exit nonzero. `--allow-incomplete` is only for CPU-only diagnostics; its rows remain ineligible for performance acceptance.
+
+Each case runs in a fresh interpreter; each Triton case also uses a unique empty Triton cache. Cold is the first timed solver call after benchmark/package import and input setup. CUDA rows additionally complete context setup and input transfer before timing. Explicit private lanes resolve their backend module before timing; the default public lane includes any lazy backend import. Triton cold includes kernel compilation and execution. The default three process rounds retain three raw cold samples and reverse backend order on alternating rounds. Warm CUDA samples are synchronized, device-resident solver latency. They include backend-adapter work, implementation validation when applicable, workspace allocation, execution, and result conversion, but exclude input generation/transfer, SciPy-oracle construction, and parity diagnostics. GPU driver and hardware state are observed, not reset.
+
+Every cold, warmup, and timed result must exactly match the promoted SciPy assignment. JSONL records bind evidence to the benchmark Git revision/source digest, imported package origin/digest, executed backend module/digest, input digest, raw samples, CPU model, dependency versions, and available `nvidia-smi` driver/clock/power/temperature state. The console table is only a one-decimal summary.
 
 The first Triton call may be slower because it includes cold compilation; measure cold compilation separately from warm execution. Do not generalize performance across GPU models or workloads. The active `0.1.0+` line requires the correctness, AMP/dtype, fallback, packaging, GPU, and warm-performance gates to pass on each advertised GPU class.
 
@@ -122,9 +134,52 @@ Representative batch-208 float32 performance is shown below. Each timing cell is
 
 The Triton implementation parallelizes batch items and vectorizes each current candidate-column scan. Commit `eee95ffc` also terminates the shortest-path search when an augmentation finds an unmatched sink. This removes the post-completion iterations that dominated direct matrices. Against the same-machine SciPy CPU reference, representative warm Triton speedups span `56.7x`--`103.5x` while retaining exact assignment parity.
 
-`first*` means the first call for that case in the shared benchmark process. It is not an isolated compilation measurement: earlier shapes and dtypes can populate driver, process, and Triton disk caches. The three notebooks also predate the fresh-process benchmark-integrity harness, so these measurements are provisional author-run evidence rather than the final cold-performance record. Publication-grade cold claims require a source-bound, five-process rerun.
+`first*` means the first call for that case in the shared benchmark process. It is not an isolated compilation measurement: earlier shapes and dtypes can populate driver, process, and Triton disk caches. The three notebooks also predate the fresh-process benchmark-integrity harness described above, so these measurements are provisional author-run evidence rather than the final cold-performance record. They carry no self-authenticating JSONL provenance, and H100 has never been measured. Publication-grade cold claims require a source-bound, five-process rerun on each advertised GPU class.
 
 Do not publish a Triton-only timing as a speedup. Each performance report pairs the same seeded workload with its same-machine SciPy CPU baseline.
+
+Run both cells on each fresh Colab GPU runtime and retain the two JSONL artifacts. The first installs the exact PyPI baseline; the second reinstalls, validates, and measures the checkout. Package and implementation expectations reject checkout shadowing or fallback execution.
+
+```python
+!git clone https://github.com/Borda/torch-linear-assignment.git
+%cd torch-linear-assignment
+!git checkout develop
+!git rev-parse HEAD
+!make install-legacy
+!make benchmark BENCHMARK_ARGS="--label pypi-0.0.6 --expect-package-version 0.0.6 --expect-implementation legacy_cuda --process-rounds 5 --repetitions 30"
+```
+
+```python
+!make validate
+!make benchmark BENCHMARK_ARGS="--label current-triton --expect-package-version 0.1.0rc0 --expect-implementation triton --process-rounds 5 --repetitions 30"
+```
+
+Pair only matching device, shape, dtype, seed, validation mode, and timing statistic when computing `SciPy / Triton` or `legacy / Triton`. Use `make benchmark-evidence` for the bounded batch-208 validation-overhead and memory run.
+
+For kernel diagnosis, capture a trace separately from the timing run; profiler overhead must never be reported as benchmark latency:
+
+```python
+import sys
+
+import torch
+
+from torch_linear_assignment import batch_linear_assignment
+
+generator = torch.Generator().manual_seed(320)
+cpu_cost = torch.randn((208, 300, 600), generator=generator, dtype=torch.float32)
+expected = batch_linear_assignment(cpu_cost)
+cost = cpu_cost.cuda()
+with torch.profiler.profile(
+    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    record_shapes=True,
+    profile_memory=True,
+) as profile:
+    actual = batch_linear_assignment(cost)
+torch.cuda.synchronize()
+assert "torch_linear_assignment._triton" in sys.modules
+assert torch.equal(actual.cpu(), expected)
+profile.export_chrome_trace("triton-direct-b208-f32.json")
+```
 
 For direct benchmark-script options, the underlying command writes complete JSONL evidence to a run-specific file and prints a compact table containing the backend, validation mode, shape, status, cold/warm latency, and exact-parity result:
 
@@ -151,7 +206,7 @@ For a private contributor comparison from a current checkout, the legacy extensi
 TLA_BUILD_LEGACY_CUDA=1 python -m pip install -e . --no-build-isolation
 ```
 
-This opt-in is not required for normal `0.1.0+` use and does not expose a public backend selector. For a clean cross-version benchmark, copy `tests/benchmark.py` outside the checkout first. In a separate baseline environment, `make install-legacy` installs the newest PyPI release matching `torch-linear-assignment<0.1.0`; the copied runner then measures its installed public CUDA backend. Pair those results with the same shapes, dtypes, seed, GPU, and validation mode from the current Triton run.
+This opt-in is not required for normal `0.1.0+` use and does not expose a public backend selector. In a separate baseline environment, `make install-legacy` installs the exact PyPI `0.0.6` baseline and fails if the checkout shadows that installed distribution. `make benchmark` then runs a copy of `tests/benchmark.py` from outside the checkout, so the cross-version measurement targets the installed public CUDA backend rather than the working tree. Pair those results with the same shapes, dtypes, seed, GPU, and validation mode from the current Triton run.
 
 The following author-run batch-208 FP32 comparison uses the same `transpose / square / direct` ordering as the main table. Ratios above `1.0x` mean Triton is faster; values are rounded to one decimal, and `~` marks ratios derived from separately displayed legacy and current-package timings.
 

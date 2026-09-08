@@ -375,3 +375,50 @@ def test_batch_linear_assignment_compiled_obeys_non_default_stream(
 
     assert actual.dtype == torch.long
     assert torch.equal(actual.cpu(), expected)
+
+
+def test_batch_linear_assignment_compiled_isolates_two_cuda_devices() -> None:
+    """Prevent stream, current-device, and workspace state from leaking across GPUs."""
+    reason = _compiled_triton_skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    devices = [
+        torch.device(f"cuda:{device_index}")
+        for device_index in range(torch.cuda.device_count())
+        if torch.cuda.get_device_capability(device_index) >= (8, 0)
+    ]
+    if len(devices) < 2:
+        pytest.skip("compiled multi-device acceptance requires two CUDA devices with capability >= 8.0")
+
+    backend = importlib.import_module("torch_linear_assignment._triton")
+    device_costs = [
+        (
+            devices[0],
+            torch.rand((1, 3, 3), generator=torch.Generator().manual_seed(41))
+            + torch.tensor([[[0.0, 10.0, 10.0], [10.0, 0.0, 10.0], [10.0, 10.0, 0.0]]]),
+        ),
+        (
+            devices[1],
+            torch.rand((1, 3, 3), generator=torch.Generator().manual_seed(42))
+            + torch.tensor([[[10.0, 0.0, 10.0], [10.0, 10.0, 0.0], [0.0, 10.0, 10.0]]]),
+        ),
+    ]
+    streams = [torch.cuda.Stream(device=device) for device, _ in device_costs]
+    expected = [_scipy_assignment(cost) for _, cost in device_costs]
+    actual: list[torch.Tensor] = []
+
+    for (device, cost), stream in zip(device_costs, streams):
+        with torch.cuda.device(device), torch.cuda.stream(stream):
+            assert torch.cuda.current_device() == device.index
+            actual.append(backend.batch_linear_assignment(cost.to(device)))
+
+    for device, stream in zip((device for device, _ in device_costs), streams):
+        with torch.cuda.device(device):
+            stream.synchronize()
+
+    assert not torch.equal(expected[0], expected[1])
+    for (device, _), result, scipy_expected in zip(device_costs, actual, expected):
+        assert result.device == device
+        assert result.dtype == torch.long
+        assert torch.equal(result.cpu(), scipy_expected)
