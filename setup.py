@@ -1,47 +1,6 @@
-"""Package configuration with an opt-in legacy CUDA benchmark extension."""
-
-import os
+"""Package configuration for the pure-source distribution."""
 
 import setuptools
-
-
-def get_build_ext_modules() -> list[object]:
-    """Return the legacy CUDA extension only when a benchmark build requests it."""
-    if os.environ.get("TLA_BUILD_LEGACY_CUDA") != "1":
-        return []
-
-    import torch
-    import torch.utils.cpp_extension as torch_cpp_ext
-
-    can_build_cuda = torch.backends.cuda.is_built() and (
-        os.environ.get("FORCE_CUDA") == "1" or torch.cuda.is_available()
-    )
-    if not can_build_cuda:
-        raise RuntimeError(
-            "TLA_BUILD_LEGACY_CUDA=1 requires a CUDA-enabled Torch build and CUDA availability; "
-            "CPU installs do not build the legacy extension."
-        )
-
-    compile_args = {"cxx": ["-O3"]}
-    if os.environ.get("CC") is not None:
-        compile_args["nvcc"] = ["-ccbin", os.environ["CC"]]
-    return [
-        torch_cpp_ext.CUDAExtension(
-            "torch_linear_assignment._backend",
-            [
-                "src/torch_linear_assignment_cuda.cpp",
-                "src/torch_linear_assignment_cuda_kernel.cu",
-            ],
-            extra_compile_args=compile_args,
-        )
-    ]
-
-
-def get_build_ext() -> object:
-    """Return Torch's extension command for an opted-in legacy CUDA build."""
-    import torch.utils.cpp_extension as torch_cpp_ext
-
-    return torch_cpp_ext.BuildExtension
 
 
 def get_requirements() -> list[str]:
@@ -57,28 +16,23 @@ def get_long_description() -> str:
 
 
 if __name__ == "__main__":
-    extension_modules = get_build_ext_modules()
-    setup_kwargs: dict[str, object] = {
-        "name": "torch-hungarian",
-        "version": "0.1.0rc1",
-        "author": "Ivan Karpukhin",
-        "author_email": "karpuhini@yandex.ru",
-        "maintainer": "Jirka Borovec",
-        "maintainer_email": "j.borovec@gmail.com",
-        "description": "Batched linear assignment with PyTorch and CUDA.",
-        "long_description": get_long_description(),
-        "long_description_content_type": "text/markdown",
-        "url": "https://github.com/Borda/torch-hungarian",
-        "project_urls": {
+    setuptools.setup(
+        name="torch-hungarian",
+        version="0.1.0rc1",
+        author="Ivan Karpukhin",
+        author_email="karpuhini@yandex.ru",
+        maintainer="Jirka Borovec",
+        maintainer_email="j.borovec@gmail.com",
+        description="Batched linear assignment with PyTorch and CUDA.",
+        long_description=get_long_description(),
+        long_description_content_type="text/markdown",
+        url="https://github.com/Borda/torch-hungarian",
+        project_urls={
             "Source": "https://github.com/Borda/torch-hungarian",
             "Changelog": "https://github.com/Borda/torch-hungarian/blob/main/CHANGELOG.md",
             "Upstream": "https://github.com/ivan-chai/torch-linear-assignment",
         },
-        "packages": ["torch_linear_assignment"],
-        "python_requires": ">=3.10",
-        "ext_modules": extension_modules,
-        "install_requires": get_requirements(),
-    }
-    if extension_modules:
-        setup_kwargs["cmdclass"] = {"build_ext": get_build_ext()}
-    setuptools.setup(**setup_kwargs)
+        packages=["torch_linear_assignment"],
+        python_requires=">=3.10",
+        install_requires=get_requirements(),
+    )

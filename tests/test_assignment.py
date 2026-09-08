@@ -173,7 +173,7 @@ def test_package_import_does_not_require_optional_backend_modules():
         import sys
 
         class BlockOptionalBackend(importlib.abc.MetaPathFinder):
-            blocked = {"torch_linear_assignment._backend", "torch_linear_assignment._triton"}
+            blocked = {"torch_linear_assignment._triton"}
 
             def find_spec(self, fullname, path=None, target=None):
                 if fullname in self.blocked:

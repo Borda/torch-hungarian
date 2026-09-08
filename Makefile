@@ -16,7 +16,7 @@ help:
 	@echo "validate     correctness tests once, with GPU metadata when available"
 	@echo ""
 	@echo "Linting is not part of this gate; it runs through pre-commit."
-	@echo "Set TLA_BUILD_LEGACY_CUDA=1 to build the old CUDA backend for comparisons."
+	@echo "Legacy CUDA comparisons run through install-legacy in a separate environment."
 
 install:
 	$(PYTHON) -m pip install -e . --no-build-isolation
@@ -83,4 +83,3 @@ validate: validate-cpu validate-gpu
 clean:
 	rm -rf build/ dist/ *.egg-info .pytest_cache
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
-	find torch_linear_assignment -name "_backend*.so" -delete

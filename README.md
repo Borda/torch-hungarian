@@ -202,13 +202,7 @@ python -m pip install "torch-linear-assignment==0.0.6"
 
 The extension needs a compatible CUDA build environment and must include `sm_75`; the project does not promise a portable T4 wheel. Pinning it is also workload-dependent: in the recorded T4 comparison, SciPy was faster through batch 50, while legacy CUDA was materially faster for the tested batch-208 transpose and direct cases.
 
-For a private contributor comparison from a current checkout, the legacy extension can instead be built explicitly:
-
-```bash
-TLA_BUILD_LEGACY_CUDA=1 python -m pip install -e . --no-build-isolation
-```
-
-This opt-in is not required for normal `0.1.0+` use and does not expose a public backend selector. In a separate baseline environment, `make install-legacy` installs the exact PyPI `0.0.6` baseline and fails if the checkout shadows that installed distribution. `make benchmark` then runs a copy of `tests/benchmark.py` from outside the checkout, so the cross-version measurement targets the installed public CUDA backend rather than the working tree. Pair those results with the same shapes, dtypes, seed, GPU, and validation mode from the current Triton run.
+This fork carries no CUDA sources, so the legacy kernel can only be measured from its published `0.0.x` distribution; the sources remain in the upstream project and in this repository's history. In a separate baseline environment, `make install-legacy` installs the exact PyPI `0.0.6` baseline and fails if the checkout shadows that installed distribution. `make benchmark` then runs a copy of `tests/benchmark.py` from outside the checkout, so the cross-version measurement targets the installed public CUDA backend rather than the working tree. Pair those results with the same shapes, dtypes, seed, GPU, and validation mode from the current Triton run.
 
 The following author-run batch-208 FP32 comparison uses the same `transpose / square / direct` ordering as the main table. Ratios above `1.0x` mean Triton is faster; values are rounded to one decimal, and `~` marks ratios derived from separately displayed legacy and current-package timings.
 

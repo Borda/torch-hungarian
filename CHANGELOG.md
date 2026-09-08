@@ -10,6 +10,11 @@
 - Resolve the installed version from `torch-hungarian` first and from `torch-linear-assignment` second in `tests/benchmark.py` and `make benchmark`, so the fork and the frozen `0.0.6` upstream baseline are both recognized.
 - Uninstall `torch-hungarian` in `make install-legacy` before installing the `0.0.6` baseline. Both distributions provide `torch_linear_assignment`, so without this the target could report the fork's version while running the legacy backend.
 
+### Removed
+
+- Remove the legacy CUDA and C++ sources, the `TLA_BUILD_LEGACY_CUDA` opt-in build, and the in-process `legacy_cuda` benchmark backend. The `0.1.0+` public API never dispatched to that extension, nothing built or tested it, and the sources remain available upstream and in this repository's history.
+- Legacy comparisons keep working through the documented cross-environment route: `make install-legacy` installs the exact PyPI `0.0.6` baseline, and `make benchmark` still identifies, pins, and accepts a run that executes `legacy_cuda`.
+
 ### Fixed
 
 - Restrict the `triton` runtime dependency to Linux `x86_64`, matching the marker PyTorch itself uses. Triton publishes no aarch64 wheel and no source distribution, so the previous Linux-wide marker made installation fail outright on ARM Linux instead of falling back to SciPy.
