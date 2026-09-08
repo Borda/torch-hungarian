@@ -159,10 +159,15 @@ def _versions() -> dict[str, str | None]:
         triton_version = importlib.metadata.version("triton")
     except importlib.metadata.PackageNotFoundError:
         triton_version = None
-    try:
-        package_version = importlib.metadata.version("torch-linear-assignment")
-    except importlib.metadata.PackageNotFoundError:
-        package_version = None
+    # The active fork publishes as torch-hungarian; the frozen 0.0.x baseline is still
+    # distributed upstream as torch-linear-assignment. Both install torch_linear_assignment.
+    package_version = None
+    for distribution_name in ("torch-hungarian", "torch-linear-assignment"):
+        try:
+            package_version = importlib.metadata.version(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        break
     return {
         "package": package_version,
         "python": platform.python_version(),

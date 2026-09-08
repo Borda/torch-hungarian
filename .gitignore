@@ -160,6 +160,7 @@ cython_debug/
 .idea/
 .junie/
 
+.claude/state/
 .plans/
 .reports/
 .temp/

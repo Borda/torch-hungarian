@@ -39,7 +39,7 @@ jobs:
 
         distribution = Path(sys.argv[1]).name
         expected = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-        actual = metadata.version("torch-linear-assignment")
+        actual = metadata.version("torch-hungarian")
         assert actual == expected, f"release tag {expected!r} != {distribution} version {actual!r}"
         origin = Path(importlib.util.find_spec("torch_linear_assignment").origin).resolve()
         workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
