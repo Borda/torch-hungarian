@@ -5,9 +5,16 @@
 ### Fixed
 
 - Accept gradient-bearing CPU costs and unsupported-CUDA fallback costs without changing the input's autograd graph.
+
 - Reject complex costs consistently before backend dispatch or private Triton conversion, including empty batches and private validation modes.
+
 - Bind benchmark evidence to each worker's imported dispatch source and record the benchmark checkout's dirty state even when the revision is supplied by the copied runner.
+
 - Bound benchmark workers to 900 seconds by default, configurable with `--worker-timeout-seconds`; record timeouts as ineligible `worker_timeout` results.
+
+- Add a hosted GPU test lane on Modal's serverless NVIDIA hardware, ported from [Borda/affordable-GPU-CI](https://github.com/Borda/affordable-GPU-CI). A reusable workflow runs `.modal/test_runner.py`, which installs the pinned `develop` dependency group into a CUDA container and uploads the pytest log. It is called on pushes to `main`, through manual dispatch with a GPU and device count, and from the maintainer-applied `gpu-tests` pull request label, which also posts the result and removes itself. The label lane triggers on `pull_request` rather than `pull_request_target`, so fork code never receives the Modal credentials.
+
+- Fail the Modal lane closed on GPU eligibility. Every compiled Triton test skips itself on an ineligible host, so the runner checks for a CUDA-enabled PyTorch 2.4 or newer build, the `triton` package, and the requested number of devices with compute capability 8.0 or newer before pytest starts, and exits nonzero otherwise. A fully skipped suite can no longer be reported as a passing GPU run.
 
 ## 0.1.0rc1 - 2026-09-08
 

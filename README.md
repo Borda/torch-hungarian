@@ -1,6 +1,6 @@
 # Batch linear assignment for PyTorch
 
-[![PyPI version](https://badge.fury.io/py/torch-hungarian.svg)](https://badge.fury.io/py/torch-hungarian) [![Build Status](https://github.com/Borda/torch-hungarian/actions/workflows/ci-tests.yml/badge.svg)](https://github.com/Borda/torch-hungarian/actions) [![Downloads](https://img.shields.io/pypi/dm/torch-hungarian)](https://pepy.tech/project/torch-hungarian) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![PyPI version](https://badge.fury.io/py/torch-hungarian.svg)](https://badge.fury.io/py/torch-hungarian) [![Build Status](https://github.com/Borda/torch-hungarian/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/Borda/torch-hungarian/actions) [![Downloads](https://img.shields.io/pypi/dm/torch-hungarian)](https://pepy.tech/project/torch-hungarian) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 <h4 align="left">
     <p>

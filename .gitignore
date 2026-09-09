@@ -166,3 +166,6 @@ cython_debug/
 .temp/
 
 notebooks/
+
+# Modal GPU test lane output
+test-outputs/

@@ -1,0 +1,88 @@
+name: Modal GPU Tests (label-triggered)
+
+# A GPU run costs real money and needs the Modal credentials, so it stays
+# behind a maintainer-applied label. The trigger is deliberately
+# `pull_request` and never `pull_request_target`: GitHub withholds secrets from
+# fork pull requests, so untrusted code cannot reach the Modal credentials even
+# if the label is applied by mistake.
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-tests:
+    if: github.event.label.name == 'gpu-tests'
+    uses: ./.github/workflows/_modal-gpu-tests.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
+
+  report:
+    needs: gpu-tests
+    if: always() && github.event.label.name == 'gpu-tests' && needs.gpu-tests.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+    - name: Download the pytest log
+      id: download
+      continue-on-error: true
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      with:
+        name: gpu-pytest-output
+        path: test-outputs
+
+    - name: Comment the result on the pull request
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      env:
+        GPU_JOB_RESULT: ${{ needs.gpu-tests.result }}
+      with:
+        script: |
+          const fs = require('fs');
+          const path = 'test-outputs/pytest-output.log';
+          const jobResult = process.env.GPU_JOB_RESULT;
+
+          let comment = `## GPU test results\n\n**Job result:** \`${jobResult}\`\n\n`;
+
+          if (fs.existsSync(path)) {
+            // eslint-disable-next-line no-control-regex
+            const output = fs.readFileSync(path, 'utf8').replace(/\x1b\[[0-9;]*m/g, '');
+            const summary = output.split('\n').filter(line => line.includes('passed') || line.includes('failed')).pop();
+            if (summary) {
+              comment += `**Summary:** ${summary.trim()}\n\n`;
+            }
+            comment += '<details>\n<summary>Full test output</summary>\n\n```\n';
+            comment += output.substring(0, 60000);
+            if (output.length > 60000) {
+              comment += '\n... truncated, see the workflow artifact for the full log\n';
+            }
+            comment += '```\n</details>\n';
+          } else {
+            comment += 'No pytest log was produced. The GPU eligibility gate or the install step failed; see the workflow logs.\n';
+          }
+
+          comment += `\n[Workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.pull_request.number,
+            body: comment,
+          });
+
+    - name: Remove the trigger label
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      continue-on-error: true
+      with:
+        script: |
+          await github.rest.issues.removeLabel({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.pull_request.number,
+            name: 'gpu-tests',
+          });

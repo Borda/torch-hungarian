@@ -1,0 +1,35 @@
+name: Modal GPU Tests
+
+# Runs the compiled Triton lane on real NVIDIA hardware through Modal.
+# Requires the MODAL_TOKEN_ID and MODAL_TOKEN_SECRET repository secrets.
+
+on:
+  # todo: enable when added secrets to the repo
+  #push:
+  #  branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to test"
+        required: false
+        default: ""
+      gpu:
+        description: "Modal GPU request; compute capability 8.0+ only, so no T4"
+        required: false
+        default: "L4"
+      min_devices:
+        description: "Eligible CUDA devices the run requires; 2 exercises the multi-device lane"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-tests:
+    uses: ./.github/workflows/_modal-gpu-tests.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      gpu: ${{ inputs.gpu || 'L4' }}
+      min_devices: ${{ fromJSON(inputs.min_devices || '1') }}
+    secrets: inherit
