@@ -4,9 +4,8 @@ name: Modal GPU Tests
 # Requires the MODAL_TOKEN_ID and MODAL_TOKEN_SECRET repository secrets.
 
 on:
-  # todo: enable when added secrets to the repo
-  #push:
-  #  branches: ["main"]
+  push:
+    branches: ["main", "develop"]
   workflow_dispatch:
     inputs:
       ref:

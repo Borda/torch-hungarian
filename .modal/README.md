@@ -16,7 +16,7 @@ T4 (`sm_75`) therefore fails the gate rather than passing with a fully skipped s
 ## Local use
 
 ```bash
-python -m pip install "modal==1.5.5"
+python -m pip install --group modal
 export MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...
 
 modal run .modal/test_runner.py

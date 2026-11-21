@@ -48,6 +48,11 @@ develop = [
     "pytest==9.1.1",
     "tqdm==4.67.1",
 ]
+# Modal client for the hosted GPU lane in .github/workflows/_modal-gpu-tests.yml.
+# Kept as its own group so dependency updates can bump it independently.
+modal = [
+    "modal==1.5.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/Borda/torch-hungarian"
