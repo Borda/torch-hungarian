@@ -1,20 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-11-21
+
+### Added
+
+- Add a hosted GPU test lane on Modal's serverless NVIDIA hardware, ported from [Borda/affordable-GPU-CI](https://github.com/Borda/affordable-GPU-CI). A reusable workflow runs `.modal/test_runner.py`, which installs the pinned `develop` dependency group into a CUDA container, with the Modal client coming from a separate `modal` dependency group, and uploads the pytest log. It is called on pushes to `main` and `develop`, through manual dispatch with a GPU and device count, and from the maintainer-applied `gpu-tests` pull request label, which also posts the result and removes itself. The label lane triggers on `pull_request` rather than `pull_request_target`, so fork code never receives the Modal credentials.
+- Fail the Modal lane closed on GPU eligibility. Every compiled Triton test skips itself on an ineligible host, so the runner checks for a CUDA-enabled PyTorch 2.4 or newer build, the `triton` package, and the requested number of devices with compute capability 8.0 or newer before pytest starts, and exits nonzero otherwise. A fully skipped suite can no longer be reported as a passing GPU run.
+
+### Changed
+
+- Point the README citation section at the published Neurocomputing and AAAI Conference on Artificial Intelligence versions of the HoTPP and DeTPP papers instead of the arXiv preprints.
 
 ### Fixed
 
 - Accept gradient-bearing CPU costs and unsupported-CUDA fallback costs without changing the input's autograd graph.
-
 - Reject complex costs consistently before backend dispatch or private Triton conversion, including empty batches and private validation modes.
-
 - Bind benchmark evidence to each worker's imported dispatch source and record the benchmark checkout's dirty state even when the revision is supplied by the copied runner.
-
 - Bound benchmark workers to 900 seconds by default, configurable with `--worker-timeout-seconds`; record timeouts as ineligible `worker_timeout` results.
-
-- Add a hosted GPU test lane on Modal's serverless NVIDIA hardware, ported from [Borda/affordable-GPU-CI](https://github.com/Borda/affordable-GPU-CI). A reusable workflow runs `.modal/test_runner.py`, which installs the pinned `develop` dependency group into a CUDA container and uploads the pytest log. It is called on pushes to `main`, through manual dispatch with a GPU and device count, and from the maintainer-applied `gpu-tests` pull request label, which also posts the result and removes itself. The label lane triggers on `pull_request` rather than `pull_request_target`, so fork code never receives the Modal credentials.
-
-- Fail the Modal lane closed on GPU eligibility. Every compiled Triton test skips itself on an ineligible host, so the runner checks for a CUDA-enabled PyTorch 2.4 or newer build, the `triton` package, and the requested number of devices with compute capability 8.0 or newer before pytest starts, and exits nonzero otherwise. A fully skipped suite can no longer be reported as a passing GPU run.
 
 ## 0.1.0rc1 - 2026-09-08
 
@@ -25,25 +27,15 @@
 ### Changed
 
 - Continue the project as the [Borda/torch-hungarian](https://github.com/Borda/torch-hungarian) fork, published on PyPI as `torch-hungarian`. Ivan Karpukhin remains the author of the original project and of the `0.0.x` compiled CUDA line; Jirka Borovec is the maintainer of this fork.
-
 - Keep the import name `torch_linear_assignment`, so code written against the upstream project and against `torch-hungarian==0.1.0rc0` needs no change.
-
 - Point the package metadata, README badges, install command, and Colab reproduction cells at the fork, and add source, changelog, and upstream project URLs.
-
 - Resolve the installed version from `torch-hungarian` first and from `torch-linear-assignment` second in `tests/benchmark.py` and `make benchmark`, so the fork and the frozen `0.0.6` upstream baseline are both recognized.
-
 - Uninstall `torch-hungarian` in `make install-legacy` before installing the `0.0.6` baseline. Both distributions provide `torch_linear_assignment`, so without this the target could report the fork's version while running the legacy backend.
-
 - Raise the PyTorch floor from `1.12.0` to `2.0.0`. The Triton path already required `2.4` at runtime, and the SciPy fallback carries the older environments no further.
-
 - Declare all packaging metadata in `pyproject.toml` through the standard `[project]` table and delete `setup.py`. The published runtime requirements are unchanged; `Home-page` becomes a `Homepage` project URL, and the author and maintainer fields take their canonical `Name <email>` form.
-
 - Move the package sources under `src/`, so tests and tooling can no longer import the package from the working directory by accident.
-
 - Export `torch_linear_assignment.__version__` and read the distribution version from it through `[tool.setuptools.dynamic]`, so the package holds the single version declaration.
-
 - Fold `requirements.txt` into `[project.dependencies]` and `requirements-ci.txt` into a pinned `develop` dependency group, alongside an unpinned `test` group for local tooling. Dependency groups stay out of the published metadata, unlike extras.
-
 - Install the hosted validation environment with `uv`, which resolves the pinned `develop` group and reports the dependency check. The Makefile keeps `pip`, because `uv` ignores user site-packages and would shadow a local user-site install.
 
 ### Removed

@@ -23,10 +23,10 @@ The active release line is `0.1.0+`. It uses Triton on validated Linux NVIDIA GP
 
 ## Install
 
-Python 3.10 or newer is required. Install the `0.1.0` release candidate from PyPI:
+Python 3.10 or newer is required. Install the `0.1.0` release from PyPI:
 
 ```bash
-python -m pip install "torch-hungarian==0.1.0rc1"
+python -m pip install "torch-hungarian==0.1.0"
 ```
 
 The distribution is named `torch-hungarian`, while the import name stays `torch_linear_assignment`. Keeping the import name means code written against the upstream project, and against `torch-hungarian==0.1.0rc0`, continues to work unchanged.
@@ -159,7 +159,7 @@ Run both cells on each fresh Colab GPU runtime and retain the two JSONL artifact
 
 ```python
 !make validate
-!make benchmark BENCHMARK_ARGS="--label current-triton --expect-package-version 0.1.0rc1 --expect-implementation triton --process-rounds 5 --repetitions 30"
+!make benchmark BENCHMARK_ARGS="--label current-triton --expect-package-version 0.1.0 --expect-implementation triton --process-rounds 5 --repetitions 30"
 ```
 
 Pair only matching device, shape, dtype, seed, validation mode, and timing statistic when computing `SciPy / Triton` or `legacy / Triton`. Use `make benchmark-evidence` for the bounded batch-208 validation-overhead and memory run.
