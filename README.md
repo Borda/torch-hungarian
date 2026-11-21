@@ -236,19 +236,22 @@ The original project was written by Ivan Karpukhin and is published upstream as 
 The code was originally developed for the [HoTPP Benchmark](https://github.com/ivan-chai/hotpp-benchmark). If you use this code in your research project, please cite one of the following papers:
 
 ```
-@article{karpukhin2024hotppbenchmark,
-  title={HoTPP Benchmark: Are We Good at the Long Horizon Events Forecasting?},
+@article{karpukhin2026hotpp,
+  title={HoTPP benchmark: Are we good at the long horizon events forecasting?},
   author={Karpukhin, Ivan and Shipilov, Foma and Savchenko, Andrey},
-  journal={arXiv preprint arXiv:2406.14341},
-  year={2024},
-  url ={https://arxiv.org/abs/2406.14341}
+  journal={Neurocomputing},
+  pages={132771},
+  year={2026},
+  publisher={Elsevier}
 }
 
-@article{karpukhin2024detpp,
-  title={DeTPP: Leveraging Object Detection for Robust Long-Horizon Event Prediction},
+@inproceedings{karpukhin2026detecting,
+  title={Detecting the future: All-at-Once event sequence forecasting with horizon matching},
   author={Karpukhin, Ivan and Savchenko, Andrey},
-  journal={arXiv preprint arXiv:2408.13131},
-  year={2024},
-  url ={https://arxiv.org/abs/2408.13131}
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={40},
+  number={27},
+  pages={22536--22544},
+  year={2026}
 }
 ```
