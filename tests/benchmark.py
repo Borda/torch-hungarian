@@ -51,6 +51,21 @@ _VALIDATION_MODES = (
     "full",
 )
 
+#: Default workload, a cross product of one worker count with tasks and batches.
+_DEFAULT_WORKERS = 300
+_DEFAULT_TASKS = [100, 300, 600]
+_DEFAULT_BATCHES = [1, 16, 50, 208, 624]
+
+#: Named workloads as explicit ``(batch, workers, tasks)`` triples, for shapes a cross product
+#: over a single worker count cannot express.
+_PRESETS: dict[str, tuple[tuple[int, int, int], ...]] = {
+    # RF-DETR training: 300 queries per group against 1-30 targets per image. The batches are
+    # 4 and 16 images x 13 query groups, and 16 images x 13 groups x 3 decoder layers.
+    "rfdetr": tuple((batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)),
+    # Wide, square, and many-small-problem shapes, where kernel-side changes cost the most.
+    "wide": ((208, 300, 600), (208, 512, 512), (832, 300, 60)),
+}
+
 
 def _csv_values(value: str) -> list[str]:
     """Split a comma-separated CLI value and reject empty selections."""
@@ -91,9 +106,14 @@ def _arguments() -> argparse.Namespace:
         default=["scipy", "public_cuda"],
         help="comma-separated: scipy,public_cuda,triton",
     )
-    parser.add_argument("--workers", type=int, default=300)
-    parser.add_argument("--tasks", type=_integer_csv, default=[100, 300, 600])
-    parser.add_argument("--batches", type=_integer_csv, default=[1, 16, 50, 208, 624])
+    parser.add_argument(
+        "--preset",
+        choices=sorted(_PRESETS),
+        help="named (batch, workers, tasks) shapes; replaces --workers, --tasks and --batches",
+    )
+    parser.add_argument("--workers", type=int, help=f"default: {_DEFAULT_WORKERS}")
+    parser.add_argument("--tasks", type=_integer_csv, help=f"default: {_DEFAULT_TASKS}")
+    parser.add_argument("--batches", type=_integer_csv, help=f"default: {_DEFAULT_BATCHES}")
     parser.add_argument(
         "--dtypes",
         type=_csv_values,
@@ -151,6 +171,13 @@ def _arguments() -> argparse.Namespace:
         help="JSONL artifact path (default: benchmark-results-<run-id>.jsonl)",
     )
     arguments = parser.parse_args()
+
+    explicit_dimensions = [arguments.workers, arguments.tasks, arguments.batches]
+    if arguments.preset is not None and any(value is not None for value in explicit_dimensions):
+        parser.error("--preset sets every shape; do not combine it with --workers, --tasks or --batches")
+    arguments.workers = _DEFAULT_WORKERS if arguments.workers is None else arguments.workers
+    arguments.tasks = _DEFAULT_TASKS if arguments.tasks is None else arguments.tasks
+    arguments.batches = _DEFAULT_BATCHES if arguments.batches is None else arguments.batches
 
     unknown_backends = set(arguments.backends) - {
         "scipy",
@@ -406,6 +433,48 @@ def _time_call(
     return elapsed_ms, result
 
 
+def _kernel_event_timing(cost: torch.Tensor, implementation: str, repetitions: int) -> dict[str, Any]:
+    """Time the bare Triton launch with CUDA events, without the public wrapper's host-side work.
+
+    The wrapper's dtype promotion and transpose run once, outside the event window, and the launch
+    uses validation ``off`` so no host read sits inside it. Rows from SciPy or the legacy CUDA
+    extension have no such entry point and report ``unavailable``, which does not make a case
+    incomplete. The private entry point is looked up only after the measured call has loaded it.
+    """
+    solve = getattr(sys.modules.get("torch_linear_assignment._triton"), "_solve", None)
+    if not cost.is_cuda or implementation != "triton" or solve is None:
+        return {"status": "unavailable", "reason": f"no Triton kernel entry point for {implementation!r}"}
+    _, workers, tasks = cost.shape
+    if cost.numel() == 0:
+        return {"status": "unavailable", "reason": "empty problems launch no kernel"}
+    solver_cost = cost if cost.dtype == torch.float64 else cost.to(torch.float32)
+    solver_cost = (solver_cost.transpose(1, 2) if tasks < workers else solver_cost).contiguous()
+    samples = []
+    with torch.cuda.device(cost.device):
+        # One untimed launch so no lazy setup can land inside the first event window.
+        solve(solver_cost, "off")
+        for _ in range(repetitions):
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize(cost.device)
+            start.record()
+            solve(solver_cost, "off")
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end))
+    return {
+        "status": "measured",
+        "n": repetitions,
+        "median": statistics.median(samples),
+        "p95": _nearest_rank_p95(samples),
+        "samples": samples,
+        "quantile": "nearest_rank",
+        "timer": "cuda_events",
+        # The device idles until the host launches, so launch overhead lands inside the window.
+        "included": ["solver workspace allocation", "Triton launch host overhead", "kernel execution"],
+        "excluded": ["input validation", "dtype promotion", "transpose", "result conversion"],
+    }
+
+
 def _start_memory_boundary(cost: torch.Tensor) -> dict[str, int | str | None]:
     """Reset CUDA peak statistics immediately before one measured allocation boundary."""
     if not cost.is_cuda:
@@ -599,6 +668,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         "status",
         "warm median ms",
         "warm p95 ms",
+        "kernel median ms",
         "cold ms",
         "CPU/GPU warm",
         "exact parity",
@@ -608,6 +678,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
     for record in records:
         shape = record.get("shape", {})
         warm = record.get("timing", {}).get("warm_ms", {})
+        kernel = record.get("timing", {}).get("kernel_ms", {})
         cold = record.get("timing", {}).get("cold_first_call_ms")
         speedup = record.get("speedup_vs_scipy_cpu", {}).get("warm_median")
         parity = record.get("parity", {}).get("exact")
@@ -622,6 +693,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
                 str(record["status"]),
                 f"{warm['median']:.1f}" if "median" in warm else "-",
                 f"{warm['p95']:.1f}" if "p95" in warm else "-",
+                f"{kernel['median']:.2f}" if "median" in kernel else "-",
                 f"{cold:.1f}" if cold is not None else "-",
                 f"{speedup:.1f}x" if speedup is not None else "-",
                 "yes" if parity is True else "no" if parity is False else "-",
@@ -960,6 +1032,8 @@ def _case_record(
         samples.append(elapsed_ms)
         del result
     warm_memory = _finish_memory_boundary(benchmark_cost, warm_memory)
+    # After the memory boundary closes, so the extra launches do not count in the warm peak.
+    kernel_timing = _kernel_event_timing(benchmark_cost, implementation, repetitions)
     cold_definition = (
         "fresh_process_first_scipy_solver_call_after_package_import_and_input_setup"
         if backend == "scipy"
@@ -981,6 +1055,7 @@ def _case_record(
                 "quantile": "nearest_rank",
                 "timer": "wall_clock_plus_cuda_sync",
             },
+            "kernel_ms": kernel_timing,
         },
         "memory": {
             "cold": cold_memory,
@@ -1011,19 +1086,26 @@ def _validation_modes(backend: str, requested: Iterable[str]) -> list[str]:
     return list(requested) if backend == "triton" else ["full"]
 
 
-def _case_matrix(arguments: argparse.Namespace) -> list[tuple[int, str, str, int, int, str]]:
+def _case_shapes(arguments: argparse.Namespace) -> list[tuple[int, int, int]]:
+    """Return the requested ``(batch, workers, tasks)`` shapes, from a preset or the cross product."""
+    preset = getattr(arguments, "preset", None)
+    if preset is not None:
+        return list(_PRESETS[preset])
+    return [(batch, arguments.workers, tasks) for batch in arguments.batches for tasks in arguments.tasks]
+
+
+def _case_matrix(arguments: argparse.Namespace) -> list[tuple[int, str, str, int, int, int, str]]:
     """Interleave comparable backends and reverse order across process rounds."""
     cases = []
     for process_round in range(arguments.process_rounds):
         backends = list(arguments.backends)
         if arguments.backend_order == "reverse" or (arguments.backend_order == "alternate" and process_round % 2):
             backends.reverse()
-        for batch in arguments.batches:
-            for tasks in arguments.tasks:
-                for dtype_name in arguments.dtypes:
-                    for backend in backends:
-                        for validation in _validation_modes(backend, arguments.validation_modes):
-                            cases.append((process_round, backend, validation, batch, tasks, dtype_name))
+        for batch, workers, tasks in _case_shapes(arguments):
+            for dtype_name in arguments.dtypes:
+                for backend in backends:
+                    for validation in _validation_modes(backend, arguments.validation_modes):
+                        cases.append((process_round, backend, validation, batch, workers, tasks, dtype_name))
     return cases
 
 
@@ -1180,7 +1262,7 @@ def main() -> None:
         return
 
     cases = _case_matrix(arguments)
-    for process_round, backend, validation, batch, tasks, dtype_name in tqdm(
+    for process_round, backend, validation, batch, workers, tasks, dtype_name in tqdm(
         cases, desc="Benchmark cases", unit="case"
     ):
         specification = {
@@ -1188,7 +1270,7 @@ def main() -> None:
             "backend": backend,
             "validation": validation,
             "batch": batch,
-            "workers": arguments.workers,
+            "workers": workers,
             "tasks": tasks,
             "dtype_name": dtype_name,
             "seed": arguments.seed,

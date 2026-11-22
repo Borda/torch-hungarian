@@ -4,7 +4,7 @@ Hosted GitHub runners have no GPU, so the compiled Triton tests never execute in
 
 ## Why it is fail-closed
 
-Every test in `tests/test_triton.py` skips itself when the host cannot honestly run a compiled kernel, and the CUDA tests in `tests/test_assignment.py` do the same. A GPU run that quietly skipped everything would report success while proving nothing, so `test_runner.py` checks eligibility before pytest starts and exits nonzero when the host does not qualify:
+Every test in `tests/unittests/test_triton.py` and `tests/integrations/test_rfdetr_gpu.py` skips itself when the host cannot honestly run a compiled kernel, and the CUDA tests in `tests/unittests/test_assignment.py` do the same. A GPU run that quietly skipped everything would report success while proving nothing, so `test_runner.py` checks eligibility before pytest starts and exits nonzero when the host does not qualify:
 
 - an available CUDA device on a CUDA-enabled PyTorch build,
 - PyTorch 2.4 or newer,
@@ -20,12 +20,14 @@ python -m pip install --group modal
 export MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...
 
 modal run .modal/test_runner.py
-modal run .modal/test_runner.py --test-path tests/test_triton.py --pytest-args "-v -k compiled"
+modal run .modal/test_runner.py --test-path tests/unittests/test_triton.py --pytest-args "-v -k compiled"
+modal run .modal/test_runner.py --test-path tests/integrations/
 MODAL_GPU=A100 modal run .modal/test_runner.py
 MODAL_GPU=L4:2 modal run .modal/test_runner.py --min-devices 2
+modal run .modal/test_runner.py --benchmark-preset rfdetr --benchmark-args "--process-rounds 1"
 ```
 
-The container installs the project with the pinned `develop` dependency group, so the GPU environment matches the hosted CPU snapshot except for the CUDA PyTorch wheel. The pytest log is mirrored to `test-outputs/pytest-output.log` next to the checkout.
+The container installs the project with the pinned `develop` and `rfdetr` dependency groups, so the GPU environment matches the hosted CPU snapshot except for the CUDA PyTorch wheel, and the image build fails unless the package is imported from the checkout. The default `tests/` path runs both `tests/unittests` and `tests/integrations`. The pytest log is mirrored to `test-outputs/pytest-output.log` next to the checkout; a `--benchmark-preset` run saves its records to `test-outputs/benchmark-<preset>.jsonl` instead.
 
 ## CI use
 

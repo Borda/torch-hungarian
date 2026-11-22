@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Split the suite into `tests/unittests/` for the package's own tests and `tests/integrations/` for tests against downstream projects. `make test` and the CPU matrix run the unit tests; the Modal lane runs both. The compiled-kernel host checks move to `tests/_triton_eligibility.py`, shared by both suites.
+- Test the RF-DETR integration against RF-DETR's own SciPy matcher. `tests/integrations/test_rfdetr.py` compares RF-DETR 1.12.1's batched solve with its per-problem SciPy oracle at training shapes: 300 queries in 13 groups, 0 to 30 targets per image, several decoder layers, more targets than queries per group, and mixed query counts. Continuous costs must return the oracle's exact index pairs, and tied costs its objective. `tests/integrations/test_rfdetr_gpu.py` repeats the comparison on the Triton kernel and checks RF-DETR's CUDA matcher, single- and multi-layer, against the host matcher; each test asserts that the kernel ran, so an unsupported GPU cannot turn it into SciPy against SciPy.
+- Add an `rfdetr` dependency group and `make install-rfdetr`, which installs the checkout after RF-DETR with `--no-deps` and fails unless the package is imported from the checkout. RF-DETR's `train` extra pins an older `torch-hungarian` and is not used. A separate CPU workflow job runs the host tests, and the Modal GPU image installs the group and checks the import origin at build time.
+- Add `--preset rfdetr` and `--preset wide` to the benchmark, with `make benchmark-rfdetr`, `make benchmark-wide`, and `modal run .modal/test_runner.py --benchmark-preset <name>`. A preset is a list of explicit `(batch, workers, tasks)` shapes, so one run can mix worker counts. Every Triton row also reports kernel-only time from CUDA events, with dtype promotion, transpose, validation, and result conversion kept outside the timed window.
+
 ## 0.1.0 - 2026-11-21
 
 ### Added

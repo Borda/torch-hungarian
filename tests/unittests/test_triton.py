@@ -6,70 +6,15 @@ behavior but is not evidence that a Triton kernel compiled or executed.
 """
 
 import importlib
-import re
-import sys
 
 import pytest
 import torch
 from scipy.optimize import linear_sum_assignment
 
-_MINIMUM_TORCH_VERSION = (2, 4)
+from tests._triton_eligibility import compiled_device_params, compiled_triton_skip_reason
 
 
-def _compiled_triton_skip_reason() -> str | None:
-    """Return why compiled-kernel tests cannot honestly run on this host."""
-    if sys.platform != "linux":
-        return "compiled Triton acceptance requires Linux; macOS fallback is not kernel evidence"
-    if not torch.cuda.is_available():
-        return "compiled Triton acceptance requires an available CUDA device"
-    if torch.version.cuda is None:
-        return "compiled Triton acceptance requires a CUDA-enabled PyTorch build"
-    version = re.match(r"(\d+)\.(\d+)", torch.__version__)
-    if version is None or tuple(map(int, version.groups())) < _MINIMUM_TORCH_VERSION:
-        return "compiled Triton acceptance requires PyTorch 2.4 or newer"
-    try:
-        importlib.import_module("triton")
-    except ModuleNotFoundError as error:
-        if error.name == "triton":
-            return "compiled Triton acceptance requires the optional triton package"
-        raise
-    return None
-
-
-def _compiled_device_params():
-    """Parametrize every supported CUDA device or report the exact ineligibility."""
-    reason = _compiled_triton_skip_reason()
-    if reason is not None:
-        return [pytest.param(None, marks=pytest.mark.skip(reason=reason), id="ineligible")]
-
-    params: list[pytest.ParameterSet] = []
-    for device_index in range(torch.cuda.device_count()):
-        capability = torch.cuda.get_device_capability(device_index)
-        device = torch.device(f"cuda:{device_index}")
-        if capability < (8, 0):
-            params.append(
-                pytest.param(
-                    device,
-                    marks=pytest.mark.skip(
-                        reason=(
-                            "compiled Triton acceptance requires NVIDIA compute "
-                            f"capability >= 8.0; cuda:{device_index} is {capability}"
-                        )
-                    ),
-                    id=f"cuda-{device_index}-sm-{capability[0]}{capability[1]}",
-                )
-            )
-            continue
-        params.append(
-            pytest.param(
-                device,
-                id=f"cuda-{device_index}-sm-{capability[0]}{capability[1]}",
-            )
-        )
-    return params
-
-
-@pytest.fixture(params=_compiled_device_params())
+@pytest.fixture(params=compiled_device_params())
 def triton_backend_device(
     request: pytest.FixtureRequest,
 ) -> tuple[object, torch.device]:
@@ -412,7 +357,7 @@ def test_batch_linear_assignment_compiled_obeys_non_default_stream(
 
 def test_batch_linear_assignment_compiled_isolates_two_cuda_devices() -> None:
     """Prevent stream, current-device, and workspace state from leaking across GPUs."""
-    reason = _compiled_triton_skip_reason()
+    reason = compiled_triton_skip_reason()
     if reason is not None:
         pytest.skip(reason)
 
