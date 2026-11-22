@@ -568,7 +568,9 @@ def test_kernel_timing_is_unavailable_without_a_loaded_triton_backend(monkeypatc
     """Prevent SciPy and legacy rows from importing or claiming a Triton kernel time."""
     monkeypatch.delitem(sys.modules, "torch_linear_assignment._triton", raising=False)
 
-    timing = benchmark._kernel_event_timing(torch.zeros((1, 2, 2)), "scipy", repetitions=3)
+    timing = benchmark._kernel_event_timing(
+        torch.zeros((1, 2, 2)), "scipy", repetitions=3, expected=torch.zeros((1, 2))
+    )
 
     assert timing["status"] == "unavailable"
     assert "torch_linear_assignment._triton" not in sys.modules
@@ -617,19 +619,34 @@ def test_kernel_timing_keeps_input_preparation_outside_the_event_window(monkeypa
             return 2.0
 
     backend = ModuleType("torch_linear_assignment._triton")
-    backend._solve = lambda _cost, validation: events.append(f"solve:{validation}")  # type: ignore[attr-defined]
+    expected = torch.tensor([[0, 1, -1]])
+
+    def solve(_cost: object, validation: str) -> tuple[torch.Tensor, torch.Tensor]:
+        events.append(f"solve:{validation}")
+        return expected, expected
+
+    backend._solve = solve  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch_linear_assignment._triton", backend)
     monkeypatch.setattr(torch.cuda, "Event", Event)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: events.append("sync"))
     monkeypatch.setattr(torch.cuda, "device", lambda _device: contextlib.nullcontext())
 
-    timing = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2)  # type: ignore[arg-type]
+    timing = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
 
     assert events[:4] == ["to:torch.float32", "transpose", "contiguous", "solve:off"]
     assert events[4:] == ["sync", "record", "solve:off", "record", "event-sync"] * 2
     assert timing["status"] == "measured"
     assert timing["median"] == 2.0
     assert timing["timer"] == "cuda_events"
+
+    backend._solve = lambda _cost, _validation: (torch.zeros_like(expected), torch.zeros_like(expected))  # type: ignore[attr-defined]
+    failure = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
+    assert failure == {"status": "parity_failed", "result_call": "kernel_warmup"}
+
+    calls = iter([(torch.zeros_like(expected), expected), (expected, torch.zeros_like(expected))])
+    backend._solve = lambda _cost, _validation: next(calls)  # type: ignore[attr-defined]
+    failure = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
+    assert failure == {"status": "parity_failed", "result_call": "kernel_timed:0"}
 
 
 def test_format_table_shows_kernel_only_time_beside_the_public_call() -> None:
@@ -644,7 +661,7 @@ def test_format_table_shows_kernel_only_time_beside_the_public_call() -> None:
         ]
     )
 
-    assert "kernel median ms" in table
+    assert "solver median ms" in table
     assert "1.25" in table
 
 
@@ -719,6 +736,31 @@ def test_summarize_rounds_reports_a_parity_miss_in_any_round() -> None:
 
     assert row["parity"] == {"exact": False}
     assert "no" in benchmark._format_table([row]).splitlines()[1].split()
+
+
+def test_summarize_rounds_rejects_unpaired_and_failed_rounds() -> None:
+    """A failed round cannot leave an exact speedup in the aggregate."""
+    failed = _round_record("public_cuda", 0, 3.0, exact=False)
+    failed["status"] = "parity_failed"
+    records = [_round_record("scipy", 0, 10.0), _round_record("public_cuda", 1, 2.0), failed]
+
+    _, gpu, _ = benchmark._summarize_rounds(records)
+
+    assert gpu["parity"]["exact"] is False
+    assert "speedup_vs_scipy_cpu" not in gpu
+
+
+def test_summarize_rounds_marks_a_worker_failure_as_unknown_parity() -> None:
+    """A missing result cannot support an exact-parity claim."""
+    failed = _round_record("public_cuda", 1, 3.0)
+    failed["status"] = "worker_failed"
+    del failed["parity"]
+    records = [_round_record("scipy", 0, 10.0), _round_record("public_cuda", 0, 2.0), failed]
+
+    _, gpu, _ = benchmark._summarize_rounds(records)
+
+    assert gpu["parity"]["exact"] is None
+    assert "speedup_vs_scipy_cpu" not in gpu
 
 
 def test_process_statistics_require_every_fresh_process_round() -> None:

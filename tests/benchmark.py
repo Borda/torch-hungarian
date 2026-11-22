@@ -436,7 +436,9 @@ def _time_call(
     return elapsed_ms, result
 
 
-def _kernel_event_timing(cost: torch.Tensor, implementation: str, repetitions: int) -> dict[str, Any]:
+def _kernel_event_timing(
+    cost: torch.Tensor, implementation: str, repetitions: int, expected: torch.Tensor
+) -> dict[str, Any]:
     """Time the bare Triton launch with CUDA events, without the public wrapper's host-side work.
 
     The wrapper's dtype promotion and transpose run once, outside the event window, and the launch
@@ -455,14 +457,20 @@ def _kernel_event_timing(cost: torch.Tensor, implementation: str, repetitions: i
     samples = []
     with torch.cuda.device(cost.device):
         # One untimed launch so no lazy setup can land inside the first event window.
-        solve(solver_cost, "off")
+        outputs = solve(solver_cost, "off")
+        result = outputs[1 if tasks < workers else 0].to(torch.long)
+        if not torch.equal(result.cpu(), expected):
+            return {"status": "parity_failed", "result_call": "kernel_warmup"}
         for _ in range(repetitions):
             start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize(cost.device)
             start.record()
-            solve(solver_cost, "off")
+            outputs = solve(solver_cost, "off")
             end.record()
             end.synchronize()
+            result = outputs[1 if tasks < workers else 0].to(torch.long)
+            if not torch.equal(result.cpu(), expected):
+                return {"status": "parity_failed", "result_call": f"kernel_timed:{len(samples)}"}
             samples.append(start.elapsed_time(end))
     return {
         "status": "measured",
@@ -671,7 +679,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         "status",
         "warm median ms",
         "warm p95 ms",
-        "kernel median ms",
+        "solver median ms",
         "cold ms",
         "CPU/GPU warm",
         "exact parity",
@@ -763,6 +771,7 @@ def _summarize_case_rounds(group: list[dict[str, Any]]) -> dict[str, Any]:
         "timing": timing,
         "parity": {"exact": False if False in exact else True if all(value is True for value in exact) else None},
         "process_rounds": len(group),
+        "round_ids": [record.get("process_round") for record in group],
     }
 
 
@@ -816,6 +825,36 @@ def _summarize_rounds(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     for row in rows:
         if row.get("backend") == "scipy" or row.get("status") != "measured":
+            continue
+        failed = [
+            record
+            for record in records
+            if record.get("status") != "measured"
+            and record.get("backend") == row.get("backend")
+            and _pair_key(record) == _pair_key(row)
+            and record.get("validation_mode") == row.get("validation_mode")
+        ]
+        if any(record.get("parity", {}).get("exact") is False for record in failed):
+            row["parity"]["exact"] = False
+        elif failed:
+            row["parity"]["exact"] = None
+        cpu_row = next(
+            (
+                item
+                for item in rows
+                if item.get("backend") == "scipy"
+                and item.get("status") == "measured"
+                and _pair_key(item) == _pair_key(row)
+            ),
+            None,
+        )
+        cpu_failed = any(
+            record.get("status") != "measured"
+            and record.get("backend") == "scipy"
+            and _pair_key(record) == _pair_key(row)
+            for record in records
+        )
+        if failed or cpu_failed or cpu_row is None or set(cpu_row["round_ids"]) != set(row["round_ids"]):
             continue
         cpu, gpu = scipy_warm.get(_pair_key(row)), row["timing"]["warm_ms"].get("median")
         if cpu is not None and gpu:
@@ -1155,7 +1194,15 @@ def _case_record(
         del result
     warm_memory = _finish_memory_boundary(benchmark_cost, warm_memory)
     # After the memory boundary closes, so the extra launches do not count in the warm peak.
-    kernel_timing = _kernel_event_timing(benchmark_cost, implementation, repetitions)
+    kernel_timing = _kernel_event_timing(benchmark_cost, implementation, repetitions, oracle)
+    if kernel_timing.get("status") == "parity_failed":
+        return {
+            **base,
+            "status": "parity_failed",
+            "parity": {"oracle": "scipy_promoted", "exact": False},
+            "diagnostics": kernel_timing,
+            "acceptance_eligible": False,
+        }
     cold_definition = (
         "fresh_process_first_scipy_solver_call_after_package_import_and_input_setup"
         if backend == "scipy"
