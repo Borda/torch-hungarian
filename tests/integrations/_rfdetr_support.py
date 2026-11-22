@@ -51,6 +51,7 @@ COMPACT_PROBLEMS = {
     # More targets than queries per group: padding cannot separate real columns, so RF-DETR
     # solves one bucket per distinct shape instead, including wide problems.
     "more-targets-than-group-width": CompactProblem((4, 4), (6, 1, 0, 4), RFDETR_GROUP_DETR),
+    "targets-equal-group-width": CompactProblem((4,), (4, 1), RFDETR_GROUP_DETR),
     # Layers with different query counts cannot share one padded batch either.
     "mixed-query-counts": CompactProblem((RFDETR_GROUP_WIDTH, 200), (3, 9), RFDETR_GROUP_DETR),
 }

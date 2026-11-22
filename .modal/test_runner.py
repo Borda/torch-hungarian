@@ -33,6 +33,7 @@ Environment Variables:
     MODAL_PYTHON_VERSION: Python version of the container image.
 """
 
+import json
 import os
 import shlex
 import subprocess
@@ -69,7 +70,7 @@ RUN_TIMEOUT_SECONDS = 3600
 #: Captured benchmark records, relative to the project directory on both sides.
 BENCHMARK_OUTPUT_DIR = Path("test-outputs")
 
-#: Benchmark presets the lane may run; each records kernel-only time beside the public call.
+#: Benchmark presets the lane may run; each records validation-off solver time beside the public call.
 BENCHMARK_PRESETS = ("rfdetr", "wide")
 
 _SEPARATOR = "=" * 80
@@ -79,7 +80,8 @@ _CHECKOUT_IMPORT_CHECK = (
     "from pathlib import Path; import rfdetr.models.matcher, rfdetr.models._assignment; "
     "import torch_linear_assignment as package; "
     f"origin = Path(package.__file__).resolve(); checkout = Path({REMOTE_PROJECT_DIR!r}); "
-    "assert checkout in origin.parents, f'torch_linear_assignment is not imported from the checkout: {origin}'; "
+    "expected = checkout / 'src/torch_linear_assignment/__init__.py'; "
+    "assert origin == expected, f'torch_linear_assignment is not imported from the checkout: {origin}'; "
     "print(f'torch_linear_assignment imported from {origin}')"
 )
 
@@ -289,10 +291,16 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     gate_failure = _gpu_gate_failure(1)
     if gate_failure is not None:
         print(f"{_SEPARATOR}\nGPU GATE FAILED: {gate_failure}\n{_SEPARATOR}")
-        return {"returncode": 1, "success": False, "gate_failure": gate_failure, "pytest_output": ""}
+        record = json.dumps({"status": "gpu_ineligible", "details": [gate_failure]}) + "\n"
+        return {"returncode": 1, "success": False, "gate_failure": gate_failure, "pytest_output": record}
 
     output = Path(REMOTE_PROJECT_DIR) / BENCHMARK_OUTPUT_DIR / f"benchmark-{preset}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
+    extra_args = shlex.split(benchmark_args)
+    allowed = {"--process-rounds", "--warmup", "--repetitions", "--worker-timeout-seconds"}
+    if any(arg.split("=", 1)[0] not in allowed for arg in extra_args if arg.startswith("--")):
+        raise ValueError("benchmark arguments may only tune rounds, warmup, repetitions, and timeout")
+    output.unlink(missing_ok=True)
     command = [
         sys.executable,
         "tests/benchmark.py",
@@ -306,7 +314,7 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
         "triton",
         "--output",
         str(output),
-        *shlex.split(benchmark_args),
+        *extra_args,
     ]
     print(f"{_SEPARATOR}\nRUNNING: {' '.join(command)}\n{_SEPARATOR}")
     environment = {**os.environ, "TLA_BENCHMARK_GIT_REVISION": git_revision} if git_revision else None
@@ -319,7 +327,7 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     print(f"{_SEPARATOR}\nEXIT CODE: {process.returncode}\n{_SEPARATOR}")
     return {
         "returncode": process.returncode,
-        "success": process.returncode == 0,
+        "success": process.returncode == 0 and bool(records.strip()),
         "pytest_output": records,
         "summary": process.stdout,
     }
@@ -349,7 +357,7 @@ def _dispatch_benchmark(preset: str, benchmark_args: str) -> None:
         summary.write_text(result.get("summary") or "The benchmark printed no results table; see the run log.\n")
     print(f"Saved benchmark records to: {output} and the table to: {summary}")
     if not result["success"]:
-        sys.exit(result.get("gate_failure") or result["returncode"])
+        sys.exit(result.get("gate_failure") or result["returncode"] or "Benchmark produced no records")
     print("Benchmark passed its parity and completeness gates.")
 
 

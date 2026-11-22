@@ -39,7 +39,28 @@ def test_rfdetr_imports_this_checkout_not_a_pinned_release() -> None:
     """Fail when an rfdetr install replaced the package under test with its own pinned release."""
     checkout = Path(__file__).resolve().parents[2]
     origin = Path(torch_linear_assignment.__file__).resolve()
-    assert checkout in origin.parents, f"torch_linear_assignment imported from {origin}, not {checkout}"
+    expected = checkout / "src" / "torch_linear_assignment" / "__init__.py"
+    assert origin == expected, f"torch_linear_assignment imported from {origin}, not {expected}"
+
+
+def test_checkout_check_rejects_a_wheel_inside_the_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject an installed wheel even when its environment is inside the checkout."""
+    checkout = Path(__file__).resolve().parents[2]
+    origin = checkout / ".venv" / "lib" / "site-packages" / "torch_linear_assignment" / "__init__.py"
+    monkeypatch.setattr(torch_linear_assignment, "__file__", str(origin))
+
+    with pytest.raises(AssertionError, match="not"):
+        test_rfdetr_imports_this_checkout_not_a_pinned_release()
+
+
+def test_float64_cost_preserves_a_small_assignment_difference() -> None:
+    """Preserve a float64 optimum that disappears when costs are narrowed to float32."""
+    cost = torch.tensor([[0.0, 1.0], [1.0, 2.0 + 1e-8]], dtype=torch.float64)
+
+    actual = rfdetr_assignment.assign_many_bucketed([cost], [2], 1)[0][0]
+
+    assert actual[0].tolist() == [0, 1]
+    assert actual[1].tolist() == [1, 0]
 
 
 @pytest.mark.parametrize("problem", list(COMPACT_PROBLEMS.values()), ids=list(COMPACT_PROBLEMS))

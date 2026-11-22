@@ -13,8 +13,8 @@ help:
 	@echo "test-rfdetr  run the RF-DETR integration tests; fails if rfdetr is missing"
 	@echo "benchmark    run SciPy and available GPU benchmark comparisons"
 	@echo "benchmark-evidence record paired Triton validation, memory, and isolated cold evidence"
-	@echo "benchmark-rfdetr RF-DETR training shapes, with kernel-only time"
-	@echo "benchmark-wide wide and square shapes, with kernel-only time"
+	@echo "benchmark-rfdetr RF-DETR training shapes, with validation-off solver time"
+	@echo "benchmark-wide wide and square shapes, with validation-off solver time"
 	@echo "validate-cpu install-dev and test - runs anywhere"
 	@echo "validate-gpu GPU test and metadata lane - skips cleanly without a CUDA device"
 	@echo "validate-gpu-multi two-GPU compiled Triton acceptance - fails unless two eligible GPUs are visible"
@@ -53,8 +53,10 @@ check-rfdetr:
 	@set -e; \
 	verify_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$verify_dir"' EXIT; \
+	python_path=$$(command -v $(PYTHON)); \
+	python_path=$$(cd "$$(dirname "$$python_path")" && pwd)/$$(basename "$$python_path"); \
 	cd "$$verify_dir"; \
-	TLA_CHECKOUT="$(CURDIR)" $(PYTHON) -c "import importlib.metadata as m, os; from pathlib import Path; import torch_linear_assignment as package, rfdetr.models.matcher, rfdetr.models._assignment; origin = Path(package.__file__).resolve(); checkout = Path(os.environ['TLA_CHECKOUT']).resolve(); assert checkout in origin.parents, f'torch_linear_assignment is not imported from the checkout: {origin}'; version = m.version('rfdetr'); assert version == '1.12.1', version; print(f'rfdetr {version} | torch_linear_assignment from {origin}')"
+	TLA_CHECKOUT="$(CURDIR)" "$$python_path" -c "import importlib.metadata as m, os; from pathlib import Path; import torch_linear_assignment as package, rfdetr.models.matcher, rfdetr.models._assignment; origin = Path(package.__file__).resolve(); checkout = Path(os.environ['TLA_CHECKOUT']).resolve(); expected = checkout / 'src/torch_linear_assignment/__init__.py'; assert origin == expected, f'torch_linear_assignment is not imported from the checkout: {origin}'; version = m.version('rfdetr'); assert version == '1.12.1', version; print(f'rfdetr {version} | torch_linear_assignment from {origin}')"
 
 test: install-dev
 	$(PYTHON) -m pytest tests/unittests/ -v
@@ -80,7 +82,7 @@ benchmark-evidence:
 	$(MAKE) benchmark BENCHMARK_ARGS="--backends scipy,triton --workers 300 --tasks 100,300,600 --batches 208 --dtypes float32 --validation-modes off,nonfinite_only,infeasibility_flag_only,full --process-rounds 5 --backend-order alternate --warmup 3 --repetitions 30 --expect-implementation triton $(BENCHMARK_ARGS)"
 
 # Recorded baselines for kernel changes: the public call, the private Triton
-# backend with and without validation, and kernel-only CUDA-event time per row.
+# backend with and without validation, and CUDA-event solver time per row.
 benchmark-rfdetr:
 	$(MAKE) benchmark BENCHMARK_ARGS="--preset rfdetr --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
 

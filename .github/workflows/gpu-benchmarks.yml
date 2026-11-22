@@ -139,9 +139,14 @@ jobs:
             if (problems.length) {
               body += '**Limitations (not measured):**\n\n';
               for (const record of problems.slice(0, 20)) {
-                const shape = record.batch ? ` ${record.batch} x ${record.workers} x ${record.tasks}` : '';
-                const details = Array.isArray(record.details) ? `: ${record.details.join('; ')}` : '';
+                const dims = record.shape || {};
+                const shape = dims.batch != null ? ` ${dims.batch} x ${dims.workers} x ${dims.tasks}` : '';
+                const message = record.detail || (Array.isArray(record.details) ? record.details.join('; ') : '');
+                const details = message ? `: ${message}` : '';
                 body += `- \`${record.status}\`${record.backend ? ` ${record.backend}` : ''}${shape}${details}\n`;
+              }
+              if (problems.length > 20) {
+                body += `- ${problems.length - 20} additional records omitted; see the workflow artifact.\n`;
               }
               body += '\n';
             }
