@@ -11,6 +11,11 @@
 - Add a GPU benchmark workflow, `gpu-benchmarks.yml`, that runs the presets on Modal through manual dispatch or the maintainer-applied `gpu-benchmarks` pull request label. It writes the results table and every unmeasured record to the run summary, comments them on the pull request for the label, uploads the JSONL records, and removes the label. The Modal runner now also saves the printed table as `test-outputs/benchmark-<preset>.txt`.
 - Skip benchmark runs that measure the Triton backend, or expect the public call to use it, on a GPU below compute capability 8.0, such as a T4. The run writes one `gpu_ineligible` record naming the device and its capability before any case starts, prints it under a new `Limitations` list, and exits nonzero unless `--allow-incomplete` is given, like the existing no-GPU skip. A `public_cuda`-only run still measures a legacy build or the SciPy fallback on such a GPU.
 
+### Changed
+
+- Print one benchmark table row per case instead of one per process round. Warm, kernel, and cold times are medians across rounds, warm p95 is the worst round's, parity is exact only when every round was, and the speedup is recomputed from the medians; skipped and failed records still print individually, and the JSONL keeps every round.
+- Name both the lane and the implementation in the benchmark table's backend column when they differ, so the public call reads `public_cuda/triton` and no longer prints the same label as the private `triton` lane.
+
 ## 0.1.0 - 2026-11-21
 
 ### Added

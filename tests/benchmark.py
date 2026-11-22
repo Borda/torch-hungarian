@@ -675,7 +675,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         "cold ms",
         "CPU/GPU warm",
         "exact parity",
-        "round",
+        "rounds",
     ]
     rows = []
     for record in records:
@@ -688,7 +688,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         rows.append(
             [
                 str(record.get("run_label") or record.get("versions", {}).get("package") or "-"),
-                str(record.get("implementation", record.get("backend", "-"))),
+                _backend_label(record),
                 str(record.get("validation_mode", "-")),
                 str(record.get("input_dtype", "-")),
                 str(shape.get("batch", "-")),
@@ -700,16 +700,132 @@ def _format_table(records: list[dict[str, Any]]) -> str:
                 f"{cold:.1f}" if cold is not None else "-",
                 f"{speedup:.1f}x" if speedup is not None else "-",
                 "yes" if parity is True else "no" if parity is False else "-",
-                str(record.get("process_round", "-")),
+                str(record.get("process_rounds", "-")),
             ]
         )
 
     return pd.DataFrame(rows, columns=headers).to_string(index=False, justify="left")
 
 
+def _backend_label(record: dict[str, Any]) -> str:
+    """Name the measured lane, and the implementation it ran when that differs from the lane.
+
+    The public call and the private Triton lane both execute Triton on a supported GPU, so the
+    label keeps them apart as ``public_cuda/triton`` and ``triton``.
+    """
+    backend = record.get("backend")
+    implementation = record.get("implementation")
+    if backend is None or implementation in (None, backend):
+        return str(implementation or backend or "-")
+    return f"{backend}/{implementation}"
+
+
+def _median_present(values: list[float | None]) -> float | None:
+    """Return the median of the values that were recorded, or ``None`` when none were."""
+    present = [value for value in values if value is not None]
+    return statistics.median(present) if present else None
+
+
+def _summarize_case_rounds(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collapse one case's fresh-process rounds into a single row of medians.
+
+    Warm and kernel medians and cold time are medians across rounds, warm p95 is the worst
+    round's p95, and parity is exact only when every round was exact.
+    """
+    timings = [record.get("timing", {}) for record in group]
+    warm = {
+        "median": _median_present([timing.get("warm_ms", {}).get("median") for timing in timings]),
+        "p95": max(
+            (timing["warm_ms"]["p95"] for timing in timings if "p95" in timing.get("warm_ms", {})), default=None
+        ),
+    }
+    timing: dict[str, Any] = {
+        "cold_first_call_ms": _median_present([timing.get("cold_first_call_ms") for timing in timings]),
+        "warm_ms": {name: value for name, value in warm.items() if value is not None},
+    }
+    kernel_median = _median_present([timing.get("kernel_ms", {}).get("median") for timing in timings])
+    if kernel_median is not None:
+        timing["kernel_ms"] = {"median": kernel_median}
+    exact = [record.get("parity", {}).get("exact") for record in group]
+    identity = (
+        "run_label",
+        "versions",
+        "backend",
+        "implementation",
+        "status",
+        "validation_mode",
+        "input_dtype",
+        "shape",
+        "seed",
+    )
+    return {
+        **{name: group[0][name] for name in identity if name in group[0]},
+        "timing": timing,
+        "parity": {"exact": False if False in exact else True if all(value is True for value in exact) else None},
+        "process_rounds": len(group),
+    }
+
+
+def _summarize_rounds(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce measured records to one row per case for the console table.
+
+    Every process round of a case is folded into one row of medians, and each GPU row's
+    speedup is recomputed from those medians. Records that are not measurements, such as
+    skips and failures, are kept as they are, so none of them is hidden.
+    """
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    order: list[tuple[Any, ...] | dict[str, Any]] = []
+    for record in records:
+        if record.get("status") != "measured":
+            order.append(record)
+            continue
+        shape = record.get("shape", {})
+        key = (
+            record.get("run_label"),
+            record.get("backend"),
+            record.get("implementation"),
+            record.get("validation_mode"),
+            shape.get("batch"),
+            shape.get("workers"),
+            shape.get("tasks"),
+            record.get("input_dtype"),
+            record.get("seed"),
+        )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(record)
+
+    rows = [entry if isinstance(entry, dict) else _summarize_case_rounds(groups[entry]) for entry in order]
+
+    def _pair_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        shape = row.get("shape") or {}
+        return (
+            row.get("run_label"),
+            shape.get("batch"),
+            shape.get("workers"),
+            shape.get("tasks"),
+            row.get("input_dtype"),
+            row.get("seed"),
+        )
+
+    scipy_warm = {
+        _pair_key(row): row["timing"]["warm_ms"].get("median")
+        for row in rows
+        if row.get("backend") == "scipy" and row.get("status") == "measured"
+    }
+    for row in rows:
+        if row.get("backend") == "scipy" or row.get("status") != "measured":
+            continue
+        cpu, gpu = scipy_warm.get(_pair_key(row)), row["timing"]["warm_ms"].get("median")
+        if cpu is not None and gpu:
+            row["speedup_vs_scipy_cpu"] = {"warm_median": cpu / gpu}
+    return rows
+
+
 def _print_summary(records: list[dict[str, Any]], output: Path) -> None:
-    """Print the compact table and location of the complete JSONL evidence."""
-    print(_format_table(records))
+    """Print one table row per case, its limitations, and the location of the complete JSONL evidence."""
+    print(_format_table(_summarize_rounds(records)))
     limitations = [detail for record in records for detail in record.get("details", [])]
     if limitations:
         print("\nLimitations:\n" + "\n".join(f"- {detail}" for detail in limitations))

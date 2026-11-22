@@ -648,6 +648,79 @@ def test_format_table_shows_kernel_only_time_beside_the_public_call() -> None:
     assert "1.25" in table
 
 
+@pytest.mark.parametrize(
+    ("backend", "implementation", "label"),
+    [
+        ("public_cuda", "triton", "public_cuda/triton"),
+        ("public_cuda", "scipy_fallback", "public_cuda/scipy_fallback"),
+        ("triton", "triton", "triton"),
+        ("scipy", "scipy", "scipy"),
+        (None, None, "-"),
+    ],
+)
+def test_format_table_tells_the_public_call_from_the_private_triton_lane(
+    backend: str | None, implementation: str | None, label: str
+) -> None:
+    """Prevent the public call and the private Triton lane from printing as two identical rows."""
+    record = {"status": "measured", "backend": backend, "implementation": implementation}
+
+    table = benchmark._format_table([record])
+
+    assert table.splitlines()[1].split()[1] == label
+
+
+def _round_record(backend: str, process_round: int, warm: float, *, exact: bool = True) -> dict[str, Any]:
+    """Build one measured fresh-process round of the batch-2, 3 x 4 case."""
+    implementation = "triton" if backend != "scipy" else "scipy"
+    return {
+        "run_label": "current",
+        "backend": backend,
+        "implementation": implementation,
+        "validation_mode": "full",
+        "input_dtype": "float32",
+        "seed": 320,
+        "shape": {"batch": 2, "workers": 3, "tasks": 4},
+        "status": "measured",
+        "process_round": process_round,
+        "timing": {
+            "cold_first_call_ms": 100.0 + process_round,
+            "warm_ms": {"median": warm, "p95": warm + process_round},
+            **({"kernel_ms": {"median": warm / 2}} if backend != "scipy" else {}),
+        },
+        "parity": {"exact": exact},
+    }
+
+
+def test_summarize_rounds_prints_one_row_of_medians_per_case() -> None:
+    """Prevent a multi-round run from printing every round, which buries the comparison."""
+    skipped = {"status": "gpu_skipped", "details": ["no GPU"]}
+    records = [
+        *(_round_record("scipy", index, warm) for index, warm in enumerate([30.0, 10.0, 20.0])),
+        *(_round_record("public_cuda", index, warm) for index, warm in enumerate([2.0, 1.0, 4.0])),
+        skipped,
+    ]
+
+    scipy_row, public_row, skipped_row = benchmark._summarize_rounds(records)
+
+    assert scipy_row["process_rounds"] == public_row["process_rounds"] == 3
+    assert scipy_row["timing"]["warm_ms"] == {"median": 20.0, "p95": 30.0}
+    assert scipy_row["timing"]["cold_first_call_ms"] == 101.0
+    assert public_row["timing"]["kernel_ms"] == {"median": 1.0}
+    assert public_row["speedup_vs_scipy_cpu"] == {"warm_median": 10.0}
+    assert public_row["parity"] == {"exact": True}
+    assert skipped_row is skipped
+
+
+def test_summarize_rounds_reports_a_parity_miss_in_any_round() -> None:
+    """Prevent the median row from hiding one round that missed exact parity."""
+    records = [_round_record("triton", 0, 1.0), _round_record("triton", 1, 1.0, exact=False)]
+
+    (row,) = benchmark._summarize_rounds(records)
+
+    assert row["parity"] == {"exact": False}
+    assert "no" in benchmark._format_table([row]).splitlines()[1].split()
+
+
 def test_process_statistics_require_every_fresh_process_round() -> None:
     """Prevent one cold sample from being presented as repeated process-cold evidence."""
     records = [
