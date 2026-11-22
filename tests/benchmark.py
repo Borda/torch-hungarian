@@ -66,6 +66,9 @@ _PRESETS: dict[str, tuple[tuple[int, int, int], ...]] = {
     "wide": ((208, 300, 600), (208, 512, 512), (832, 300, 60)),
 }
 
+#: Lowest NVIDIA compute capability the package runs Triton on; below it the public call uses SciPy.
+_MINIMUM_TRITON_COMPUTE_CAPABILITY = (8, 0)
+
 
 def _csv_values(value: str) -> list[str]:
     """Split a comma-separated CLI value and reject empty selections."""
@@ -707,6 +710,9 @@ def _format_table(records: list[dict[str, Any]]) -> str:
 def _print_summary(records: list[dict[str, Any]], output: Path) -> None:
     """Print the compact table and location of the complete JSONL evidence."""
     print(_format_table(records))
+    limitations = [detail for record in records for detail in record.get("details", [])]
+    if limitations:
+        print("\nLimitations:\n" + "\n".join(f"- {detail}" for detail in limitations))
     print(f"\nJSONL results: {output.resolve()}", flush=True)
 
 
@@ -1232,6 +1238,48 @@ def _case_is_complete(record: dict[str, Any]) -> bool:
     return record.get("backend") == "scipy" or record.get("acceptance_eligible") is True
 
 
+def _triton_ineligibility(arguments: argparse.Namespace) -> str | None:
+    """Explain why the current CUDA device cannot give Triton evidence, or return ``None``.
+
+    Only a run that measures the Triton backend or expects the public call to use it is
+    affected; a ``public_cuda``-only run still measures a legacy build or the SciPy fallback.
+    """
+    wants_triton = "triton" in getattr(arguments, "backends", ()) or (
+        getattr(arguments, "expect_implementation", None) == "triton"
+    )
+    if not wants_triton:
+        return None
+    device_index = torch.cuda.current_device()
+    capability = torch.cuda.get_device_capability(device_index)
+    if capability >= _MINIMUM_TRITON_COMPUTE_CAPABILITY:
+        return None
+    minimum = ".".join(map(str, _MINIMUM_TRITON_COMPUTE_CAPABILITY))
+    return (
+        f"{torch.cuda.get_device_name(device_index)} (cuda:{device_index}) has compute capability "
+        f"{capability[0]}.{capability[1]}; the Triton backend requires {minimum} or newer, "
+        "so the GPU cases were skipped"
+    )
+
+
+def _skip_run(
+    status: str,
+    details: list[str],
+    run_id: str,
+    arguments: argparse.Namespace,
+    output: Path,
+    run_metadata: dict[str, Any],
+) -> None:
+    """Record why no case ran, and fail closed unless the run is an explicit diagnostic."""
+    record = _status_record(status, run_id, getattr(arguments, "label", None))
+    if details:
+        record["details"] = details
+    record["run_metadata"] = {**run_metadata, "gpu_state_end": _nvidia_smi_metadata()}
+    _emit(record, output)
+    _print_summary([record], output)
+    if not getattr(arguments, "allow_incomplete", False):
+        raise SystemExit(1)
+
+
 def main() -> None:
     """Run the configured matrix and emit structured evidence or skip rows."""
     arguments = _arguments()
@@ -1249,16 +1297,11 @@ def main() -> None:
     run_metadata = _run_metadata()
     requires_cuda = any(backend != "scipy" for backend in getattr(arguments, "backends", ("public_cuda",)))
     if requires_cuda and not torch.cuda.is_available():
-        record = _status_record("gpu_skipped", run_id, getattr(arguments, "label", None))
-        record["run_metadata"] = {
-            **run_metadata,
-            "gpu_state_end": _nvidia_smi_metadata(),
-        }
-        records.append(record)
-        _emit(record, output)
-        _print_summary(records, output)
-        if not getattr(arguments, "allow_incomplete", False):
-            raise SystemExit(1)
+        _skip_run("gpu_skipped", [], run_id, arguments, output, run_metadata)
+        return
+    ineligibility = _triton_ineligibility(arguments) if requires_cuda else None
+    if ineligibility is not None:
+        _skip_run("gpu_ineligible", [ineligibility], run_id, arguments, output, run_metadata)
         return
 
     cases = _case_matrix(arguments)

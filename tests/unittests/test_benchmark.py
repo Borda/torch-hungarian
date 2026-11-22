@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -1275,6 +1276,82 @@ def test_main_allows_an_explicit_diagnostic_gpu_skip(
     assert json.loads(output.read_text())["status"] == "gpu_skipped"
 
 
+def _visible_gpu(monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int], name: str = "Tesla T4") -> None:
+    """Pretend one CUDA device with the given name and compute capability is visible."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device=None: capability)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device=None: name)
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected_implementation", "capability", "skipped"),
+    [
+        pytest.param(["scipy", "triton"], None, (7, 5), True, id="triton-backend-below-8.0"),
+        pytest.param(["scipy", "public_cuda"], "triton", (7, 5), True, id="expected-triton-below-8.0"),
+        pytest.param(["scipy", "public_cuda"], None, (7, 5), False, id="legacy-or-fallback-run-below-8.0"),
+        pytest.param(["scipy", "public_cuda", "triton"], "triton", (8, 0), False, id="supported-8.0"),
+    ],
+)
+def test_triton_ineligibility_skips_only_runs_that_need_a_supported_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+    backends: list[str],
+    expected_implementation: str | None,
+    capability: tuple[int, int],
+    skipped: bool,
+) -> None:
+    """Skip Triton evidence below compute capability 8.0, but keep legacy and fallback runs measurable."""
+    _visible_gpu(monkeypatch, capability)
+    arguments = argparse.Namespace(backends=backends, expect_implementation=expected_implementation)
+
+    reason = benchmark._triton_ineligibility(arguments)
+
+    if skipped:
+        assert reason is not None
+        assert "Tesla T4 (cuda:0) has compute capability 7.5" in reason
+        assert "requires 8.0 or newer" in reason
+    else:
+        assert reason is None
+
+
+def test_main_skips_an_ineligible_gpu_before_any_case_and_lists_the_limitation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A T4 must not spend minutes measuring cases that can never count as Triton evidence."""
+    output = tmp_path / "ineligible.jsonl"
+    monkeypatch.setattr(
+        benchmark,
+        "_arguments",
+        lambda: argparse.Namespace(
+            output=output,
+            backends=["scipy", "public_cuda", "triton"],
+            expect_implementation="triton",
+            label=None,
+            allow_incomplete=False,
+            worker_case=None,
+        ),
+    )
+    _visible_gpu(monkeypatch, (7, 5))
+
+    def unexpected_case(_specification: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("no case may run on an ineligible GPU")
+
+    monkeypatch.setattr(benchmark, "_isolated_case_record", unexpected_case)
+
+    with pytest.raises(SystemExit, match="1"):
+        benchmark.main()
+
+    record = json.loads(output.read_text())
+    assert record["status"] == "gpu_ineligible"
+    assert record["acceptance_eligible"] is False
+    assert "compute capability 7.5" in record["details"][0]
+    printed = capsys.readouterr().out
+    assert "gpu_ineligible" in printed
+    assert f"Limitations:\n- {record['details'][0]}" in printed
+
+
 def test_main_invalidates_every_case_in_an_allow_incomplete_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1400,7 +1477,7 @@ def test_main_exits_nonzero_after_parity_failure(
         worker_case=None,
     )
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     monkeypatch.setattr(
         benchmark,
         "_isolated_case_record",
@@ -1461,7 +1538,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
 
     monkeypatch.setattr(benchmark, "tqdm", track_progress)
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     worker_specifications: list[dict[str, object]] = []
 
     def isolated_case_record(specification: dict[str, object]) -> dict[str, object]:

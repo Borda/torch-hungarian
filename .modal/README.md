@@ -27,19 +27,22 @@ MODAL_GPU=L4:2 modal run .modal/test_runner.py --min-devices 2
 modal run .modal/test_runner.py --benchmark-preset rfdetr --benchmark-args "--process-rounds 1"
 ```
 
-The container installs the project with the pinned `develop` and `rfdetr` dependency groups, so the GPU environment matches the hosted CPU snapshot except for the CUDA PyTorch wheel, and the image build fails unless the package is imported from the checkout. The default `tests/` path runs both `tests/unittests` and `tests/integrations`. The pytest log is mirrored to `test-outputs/pytest-output.log` next to the checkout; a `--benchmark-preset` run saves its records to `test-outputs/benchmark-<preset>.jsonl` instead.
+The container installs the project with the pinned `develop` and `rfdetr` dependency groups, so the GPU environment matches the hosted CPU snapshot except for the CUDA PyTorch wheel, and the image build fails unless the package is imported from the checkout. The default `tests/` path runs both `tests/unittests` and `tests/integrations`. The pytest log is mirrored to `test-outputs/pytest-output.log` next to the checkout; a `--benchmark-preset` run saves its records to `test-outputs/benchmark-<preset>.jsonl` and its printed table to `test-outputs/benchmark-<preset>.txt` instead.
 
 ## CI use
 
-| Workflow                                 | Trigger                                                          |
-| ---------------------------------------- | ---------------------------------------------------------------- |
-| `.github/workflows/_modal-gpu-tests.yml` | reusable; called by the two below                                |
-| `.github/workflows/gpu-tests.yml`        | push to `main`, plus manual dispatch with a GPU and device count |
-| `.github/workflows/gpu-tests-label.yml`  | the `gpu-tests` label on a pull request                          |
+| Workflow                                 | Trigger                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| `.github/workflows/_modal-gpu-tests.yml` | reusable; called by the two test workflows below                   |
+| `.github/workflows/gpu-tests.yml`        | push to `main`, plus manual dispatch with a GPU and device count   |
+| `.github/workflows/gpu-tests-label.yml`  | the `gpu-tests` label on a pull request                            |
+| `.github/workflows/gpu-benchmarks.yml`   | manual dispatch, plus the `gpu-benchmarks` label on a pull request |
 
-Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lane also needs a `gpu-tests` label to exist; it is removed again once the run reports back.
+Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lanes also need the `gpu-tests` and `gpu-benchmarks` labels to exist; each is removed again once its run reports back.
 
-The label lane triggers on `pull_request` and never on `pull_request_target`. GitHub withholds secrets from fork pull requests, so fork code cannot reach the Modal credentials even if the label is applied by mistake.
+The benchmark lane runs every preset in parallel, or the one chosen on dispatch, and fails when any case misses exact parity, any case is incomplete, or the public call did not execute the Triton backend. It reports the results table and, as limitations, every record that was not measured to the run summary and, for the label, as a pull request comment; the JSONL records are uploaded as `gpu-benchmark-<preset>` artifacts. The default three process rounds run each of the 84 preset cases in three fresh processes, and every Triton case pays a cold compile in each; pass `--process-rounds 1` on dispatch for a quicker look.
+
+Both label lanes trigger on `pull_request` and never on `pull_request_target`. GitHub withholds secrets from fork pull requests, so fork code cannot reach the Modal credentials even if the label is applied by mistake.
 
 ## Cost
 

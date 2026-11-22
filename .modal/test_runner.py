@@ -128,6 +128,7 @@ class RunResult(TypedDict, total=False):
     success: bool
     gate_failure: str
     pytest_output: str
+    summary: str
 
 
 def _gpu_gate_failure(min_devices: int) -> str | None:
@@ -274,8 +275,9 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
             because the image carries no ``.git`` directory.
 
     Returns:
-        The exit code, the success flag, the JSONL text as ``pytest_output``, and
-        the gate failure reason when the host was rejected.
+        The exit code, the success flag, the JSONL text as ``pytest_output``, the
+        printed results table as ``summary``, and the gate failure reason when the
+        host was rejected.
 
     Examples:
         >>> # modal run .modal/test_runner.py --benchmark-preset rfdetr
@@ -309,14 +311,23 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     ]
     print(f"{_SEPARATOR}\nRUNNING: {' '.join(command)}\n{_SEPARATOR}")
     environment = {**os.environ, "TLA_BENCHMARK_GIT_REVISION": git_revision} if git_revision else None
-    returncode = subprocess.run(command, cwd=REMOTE_PROJECT_DIR, env=environment, check=False).returncode
+    # Capture only stdout: it carries the results table, while the progress bar stays on stderr.
+    process = subprocess.run(
+        command, cwd=REMOTE_PROJECT_DIR, env=environment, check=False, stdout=subprocess.PIPE, text=True
+    )
+    print(process.stdout, end="")
     records = output.read_text() if output.exists() else ""
-    print(f"{_SEPARATOR}\nEXIT CODE: {returncode}\n{_SEPARATOR}")
-    return {"returncode": returncode, "success": returncode == 0, "pytest_output": records}
+    print(f"{_SEPARATOR}\nEXIT CODE: {process.returncode}\n{_SEPARATOR}")
+    return {
+        "returncode": process.returncode,
+        "success": process.returncode == 0,
+        "pytest_output": records,
+        "summary": process.stdout,
+    }
 
 
 def _dispatch_benchmark(preset: str, benchmark_args: str) -> None:
-    """Run one benchmark preset remotely and save its JSONL next to the local checkout.
+    """Run one benchmark preset remotely and save its JSONL and table next to the local checkout.
 
     Args:
         preset: One of :data:`BENCHMARK_PRESETS`.
@@ -332,7 +343,12 @@ def _dispatch_benchmark(preset: str, benchmark_args: str) -> None:
     output = BENCHMARK_OUTPUT_DIR / f"benchmark-{preset}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(result.get("pytest_output") or "")
-    print(f"Saved benchmark records to: {output}")
+    summary = output.with_suffix(".txt")
+    if result.get("gate_failure"):
+        summary.write_text(f"GPU gate failed: {result['gate_failure']}\n")
+    else:
+        summary.write_text(result.get("summary") or "The benchmark printed no results table; see the run log.\n")
+    print(f"Saved benchmark records to: {output} and the table to: {summary}")
     if not result["success"]:
         sys.exit(result.get("gate_failure") or result["returncode"])
     print("Benchmark passed its parity and completeness gates.")
