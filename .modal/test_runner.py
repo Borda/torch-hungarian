@@ -7,15 +7,23 @@ NGC PyTorch image because the pinned PyPI PyTorch wheel already carries CUDA,
 and the run is fail-closed on GPU eligibility.
 
 The fail-closed gate matters more here than anywhere else in the suite: every
-compiled-backend test in ``tests/test_triton.py`` skips itself when the host is
+compiled-backend test in ``tests/unittests/test_triton.py`` skips itself when the host is
 ineligible, so a run on an unsupported GPU would report success while proving
 nothing about the Triton kernels. The gate refuses the run instead.
 
 Usage:
     modal run .modal/test_runner.py
-    modal run .modal/test_runner.py --test-path tests/test_triton.py
+    modal run .modal/test_runner.py --test-path tests/unittests/test_triton.py
+    modal run .modal/test_runner.py --test-path tests/integrations/
     modal run .modal/test_runner.py --pytest-args "-v -k compiled"
     MODAL_GPU=L4:2 modal run .modal/test_runner.py --min-devices 2
+    modal run .modal/test_runner.py --benchmark-preset rfdetr
+    modal run .modal/test_runner.py --benchmark-preset wide --benchmark-args "--process-rounds 5"
+
+The default ``tests/`` path runs both ``tests/unittests`` and
+``tests/integrations``. The image installs the ``rfdetr`` dependency group, so
+the RF-DETR integration tests run on this lane instead of skipping. Benchmark presets write
+their JSONL records to ``test-outputs/benchmark-<preset>.jsonl``.
 
 Environment Variables:
     MODAL_GPU: GPU request passed to Modal, such as ``L4``, ``A100``, or
@@ -25,6 +33,7 @@ Environment Variables:
     MODAL_PYTHON_VERSION: Python version of the container image.
 """
 
+import json
 import os
 import shlex
 import subprocess
@@ -58,7 +67,23 @@ OUTPUT_LOG_PATH = Path("test-outputs") / "pytest-output.log"
 #: Hard safety limit; the suite runs in minutes, so this only catches a hang.
 RUN_TIMEOUT_SECONDS = 3600
 
+#: Captured benchmark records, relative to the project directory on both sides.
+BENCHMARK_OUTPUT_DIR = Path("test-outputs")
+
+#: Benchmark presets the lane may run; each records validation-off solver time beside the public call.
+BENCHMARK_PRESETS = ("rfdetr", "wide")
+
 _SEPARATOR = "=" * 80
+
+#: Run outside the checkout, so only the installed package can satisfy the import.
+_CHECKOUT_IMPORT_CHECK = (
+    "from pathlib import Path; import rfdetr.models.matcher, rfdetr.models._assignment; "
+    "import torch_linear_assignment as package; "
+    f"origin = Path(package.__file__).resolve(); checkout = Path({REMOTE_PROJECT_DIR!r}); "
+    "expected = checkout / 'src/torch_linear_assignment/__init__.py'; "
+    "assert origin == expected, f'torch_linear_assignment is not imported from the checkout: {origin}'; "
+    "print(f'torch_linear_assignment imported from {origin}')"
+)
 
 image = (
     modal.Image.debian_slim(python_version=PYTHON_VERSION)
@@ -85,8 +110,14 @@ image = (
     )
     .workdir(REMOTE_PROJECT_DIR)
     # The pinned develop group installs the CUDA PyTorch wheel and Triton, so
-    # the container needs no CUDA base image of its own.
-    .run_commands("uv pip install --system -e . --group develop")
+    # the container needs no CUDA base image of its own. The rfdetr group adds
+    # the RF-DETR integration tests; the check fails the image build unless the
+    # package is imported from the checkout, so no rfdetr dependency can swap
+    # in a released torch-hungarian and turn those tests into a no-op.
+    .run_commands(
+        "uv pip install --system -e . --group develop --group rfdetr",
+        f"cd /tmp && python -c {shlex.quote(_CHECKOUT_IMPORT_CHECK)}",
+    )
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -99,6 +130,7 @@ class RunResult(TypedDict, total=False):
     success: bool
     gate_failure: str
     pytest_output: str
+    summary: str
 
 
 def _gpu_gate_failure(min_devices: int) -> str | None:
@@ -230,18 +262,132 @@ def run_tests(test_path: str = "tests/", pytest_args: str = "-v", min_devices: i
     return {"returncode": returncode, "success": returncode == 0, "pytest_output": output}
 
 
+@app.function(gpu=GPU_TYPE, timeout=RUN_TIMEOUT_SECONDS)
+def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "") -> RunResult:
+    """Run one benchmark preset on a Modal GPU and return its JSONL records.
+
+    The benchmark compares SciPy, the public call and the private Triton backend
+    (all four validation modes, which the validation-overhead gate requires) in
+    fresh processes, and fails closed on any
+    parity mismatch or incomplete case, so a zero return code is the evidence.
+
+    Args:
+        preset: One of :data:`BENCHMARK_PRESETS`.
+        benchmark_args: Extra benchmark arguments, parsed with shell quoting rules.
+        git_revision: Revision of the local checkout, recorded as provenance
+            because the image carries no ``.git`` directory.
+
+    Returns:
+        The exit code, the success flag, the JSONL text as ``pytest_output``, the
+        printed results table as ``summary``, and the gate failure reason when the
+        host was rejected.
+
+    Examples:
+        >>> # modal run .modal/test_runner.py --benchmark-preset rfdetr
+    """
+    os.chdir(REMOTE_PROJECT_DIR)
+    _describe_environment()
+
+    gate_failure = _gpu_gate_failure(1)
+    if gate_failure is not None:
+        print(f"{_SEPARATOR}\nGPU GATE FAILED: {gate_failure}\n{_SEPARATOR}")
+        record = json.dumps({"status": "gpu_ineligible", "details": [gate_failure]}) + "\n"
+        return {"returncode": 1, "success": False, "gate_failure": gate_failure, "pytest_output": record}
+
+    output = Path(REMOTE_PROJECT_DIR) / BENCHMARK_OUTPUT_DIR / f"benchmark-{preset}.jsonl"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    extra_args = shlex.split(benchmark_args)
+    allowed = {"--process-rounds", "--warmup", "--repetitions", "--worker-timeout-seconds"}
+    if any(arg.split("=", 1)[0] not in allowed for arg in extra_args if arg.startswith("--")):
+        raise ValueError("benchmark arguments may only tune rounds, warmup, repetitions, and timeout")
+    output.unlink(missing_ok=True)
+    command = [
+        sys.executable,
+        "tests/benchmark.py",
+        "--preset",
+        preset,
+        "--backends",
+        "scipy,public_cuda,triton",
+        "--dtypes",
+        "float32",
+        "--expect-implementation",
+        "triton",
+        "--output",
+        str(output),
+        *extra_args,
+    ]
+    print(f"{_SEPARATOR}\nRUNNING: {' '.join(command)}\n{_SEPARATOR}")
+    environment = {**os.environ, "TLA_BENCHMARK_GIT_REVISION": git_revision} if git_revision else None
+    # Capture only stdout: it carries the results table, while the progress bar stays on stderr.
+    process = subprocess.run(
+        command, cwd=REMOTE_PROJECT_DIR, env=environment, check=False, stdout=subprocess.PIPE, text=True
+    )
+    print(process.stdout, end="")
+    records = output.read_text() if output.exists() else ""
+    print(f"{_SEPARATOR}\nEXIT CODE: {process.returncode}\n{_SEPARATOR}")
+    return {
+        "returncode": process.returncode,
+        # Fail closed: without --allow-incomplete a zero exit always wrote records, so an empty
+        # file means the run left no evidence, and a clean skip cannot pass for a measured run.
+        "success": process.returncode == 0 and bool(records.strip()),
+        "pytest_output": records,
+        "summary": process.stdout,
+    }
+
+
+def _dispatch_benchmark(preset: str, benchmark_args: str) -> None:
+    """Run one benchmark preset remotely and save its JSONL and table next to the local checkout.
+
+    Args:
+        preset: One of :data:`BENCHMARK_PRESETS`.
+        benchmark_args: Extra benchmark arguments, such as ``--process-rounds 5``.
+    """
+    if preset not in BENCHMARK_PRESETS:
+        sys.exit(f"unknown preset {preset!r}; choose from {', '.join(BENCHMARK_PRESETS)}")
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+    print(f"{_SEPARATOR}\nGPU BENCHMARK\n{_SEPARATOR}\nGPU: {GPU_TYPE} | preset: {preset} | revision: {revision}")
+
+    result = run_benchmark.remote(preset=preset, benchmark_args=benchmark_args, git_revision=revision)
+
+    output = BENCHMARK_OUTPUT_DIR / f"benchmark-{preset}.jsonl"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(result.get("pytest_output") or "")
+    summary = output.with_suffix(".txt")
+    if result.get("gate_failure"):
+        summary.write_text(f"GPU gate failed: {result['gate_failure']}\n")
+    else:
+        summary.write_text(result.get("summary") or "The benchmark printed no results table; see the run log.\n")
+    print(f"Saved benchmark records to: {output} and the table to: {summary}")
+    if not result["success"]:
+        sys.exit(result.get("gate_failure") or result["returncode"] or "Benchmark produced no records")
+    print("Benchmark passed its parity and completeness gates.")
+
+
 @app.local_entrypoint()
-def main(test_path: str = "tests/", pytest_args: str = "-v", min_devices: int = 1) -> None:
+def main(
+    test_path: str = "tests/",
+    pytest_args: str = "-v",
+    min_devices: int = 1,
+    benchmark_preset: str = "",
+    benchmark_args: str = "",
+) -> None:
     """Dispatch the GPU run and mirror its log next to the local checkout.
 
     Args:
         test_path: Path handed to pytest.
         pytest_args: Extra pytest arguments.
         min_devices: How many eligible CUDA devices the run requires.
+        benchmark_preset: Run this benchmark preset instead of pytest; one of
+            :data:`BENCHMARK_PRESETS`.
+        benchmark_args: Extra benchmark arguments, used with ``benchmark_preset``.
 
     Examples:
         >>> # modal run .modal/test_runner.py --pytest-args "-v -k compiled"
+        >>> # modal run .modal/test_runner.py --benchmark-preset rfdetr
     """
+    if benchmark_preset:
+        _dispatch_benchmark(benchmark_preset, benchmark_args)
+        return
     print(
         f"{_SEPARATOR}\nGPU TEST RUNNER\n{_SEPARATOR}\n"
         f"GPU: {GPU_TYPE} | Python: {PYTHON_VERSION} | minimum eligible devices: {min_devices}\n"

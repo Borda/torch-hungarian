@@ -1,20 +1,22 @@
 """Regression tests for benchmark correctness gates and replay diagnostics."""
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 
 
 def _load_benchmark_module(module_name: str = "torch_linear_assignment_benchmark") -> ModuleType:
-    """Load the standalone benchmark script without making tests a package."""
-    path = Path(__file__).with_name("benchmark.py")
+    """Load the standalone benchmark script by path; it is a CLI, not an importable test module."""
+    path = Path(__file__).parents[1] / "benchmark.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -502,6 +504,273 @@ def test_case_matrix_interleaves_backends_and_reverses_each_process_round() -> N
 
     assert [case[1] for case in cases] == ["scipy", "public_cuda", "public_cuda", "scipy"]
     assert [case[0] for case in cases] == [0, 0, 1, 1]
+
+
+def test_default_arguments_keep_the_single_worker_cross_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent the preset option from changing the default workload."""
+    monkeypatch.setattr(sys, "argv", ["benchmark.py"])
+
+    arguments = benchmark._arguments()
+
+    assert arguments.preset is None
+    assert benchmark._case_shapes(arguments) == [
+        (batch, 300, tasks) for batch in (1, 16, 50, 208, 624) for tasks in (100, 300, 600)
+    ]
+
+
+def test_default_validation_modes_satisfy_the_validation_overhead_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that leaves validation modes at their default must be able to pass the completeness gate."""
+    monkeypatch.setattr(sys, "argv", ["benchmark.py", "--preset", "rfdetr", "--backends", "scipy,public_cuda,triton"])
+
+    arguments = benchmark._arguments()
+
+    triton_modes: dict[tuple[int, int, int], set[str]] = {}
+    for _, backend, validation, batch, workers, tasks, _ in benchmark._case_matrix(arguments):
+        if backend == "triton":
+            triton_modes.setdefault((batch, workers, tasks), set()).add(validation)
+    assert triton_modes
+    assert all(modes == set(benchmark._VALIDATION_MODES) for modes in triton_modes.values())
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected"),
+    [
+        ("rfdetr", [(batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)]),
+        ("wide", [(208, 300, 600), (208, 512, 512), (832, 300, 60)]),
+    ],
+)
+def test_preset_runs_its_explicit_shapes_with_per_shape_worker_counts(
+    monkeypatch: pytest.MonkeyPatch, preset: str, expected: list[tuple[int, int, int]]
+) -> None:
+    """Prevent a preset from collapsing to one worker count or dropping a shape."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["benchmark.py", "--preset", preset, "--backends", "scipy", "--dtypes", "float32", "--process-rounds", "1"],
+    )
+    arguments = benchmark._arguments()
+
+    cases = benchmark._case_matrix(arguments)
+
+    assert [(case[3], case[4], case[5]) for case in cases] == expected
+
+
+@pytest.mark.parametrize("dimension", [["--workers", "8"], ["--tasks", "8"], ["--batches", "8"]])
+def test_preset_rejects_explicit_shape_dimensions(monkeypatch: pytest.MonkeyPatch, dimension: list[str]) -> None:
+    """Prevent a preset run from silently ignoring a requested dimension."""
+    monkeypatch.setattr(sys, "argv", ["benchmark.py", "--preset", "rfdetr", *dimension])
+
+    with pytest.raises(SystemExit):
+        benchmark._arguments()
+
+
+def test_kernel_timing_is_unavailable_without_a_loaded_triton_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent SciPy and legacy rows from importing or claiming a Triton kernel time."""
+    monkeypatch.delitem(sys.modules, "torch_linear_assignment._triton", raising=False)
+
+    timing = benchmark._kernel_event_timing(
+        torch.zeros((1, 2, 2)), "scipy", repetitions=3, expected=torch.zeros((1, 2))
+    )
+
+    assert timing["status"] == "unavailable"
+    assert "torch_linear_assignment._triton" not in sys.modules
+
+
+def test_kernel_timing_keeps_input_preparation_outside_the_event_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent wrapper-side preparation or validation reads from inflating kernel-only time."""
+    events: list[str] = []
+
+    class Cost:
+        """Stand in for a tall CUDA cost, recording the preparation it receives."""
+
+        is_cuda = True
+        device = torch.device("cuda:0")
+        dtype = torch.float16
+        shape = (2, 5, 3)
+
+        def numel(self) -> int:
+            return 30
+
+        def to(self, dtype: torch.dtype) -> "Cost":
+            events.append(f"to:{dtype}")
+            return self
+
+        def transpose(self, *_dims: int) -> "Cost":
+            events.append("transpose")
+            return self
+
+        def contiguous(self) -> "Cost":
+            events.append("contiguous")
+            return self
+
+    class Event:
+        """Record event placement and report a fixed elapsed time."""
+
+        def __init__(self, *, enable_timing: bool) -> None:
+            assert enable_timing
+
+        def record(self) -> None:
+            events.append("record")
+
+        def synchronize(self) -> None:
+            events.append("event-sync")
+
+        def elapsed_time(self, _end: "Event") -> float:
+            return 2.0
+
+    backend = ModuleType("torch_linear_assignment._triton")
+    expected = torch.tensor([[0, 1, -1]])
+
+    def solve(_cost: object, validation: str) -> tuple[torch.Tensor, torch.Tensor]:
+        events.append(f"solve:{validation}")
+        return expected, expected
+
+    backend._solve = solve  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch_linear_assignment._triton", backend)
+    monkeypatch.setattr(torch.cuda, "Event", Event)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: events.append("sync"))
+    monkeypatch.setattr(torch.cuda, "device", lambda _device: contextlib.nullcontext())
+
+    timing = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
+
+    assert events[:4] == ["to:torch.float32", "transpose", "contiguous", "solve:off"]
+    assert events[4:] == ["sync", "record", "solve:off", "record", "event-sync"] * 2
+    assert timing["status"] == "measured"
+    assert timing["median"] == 2.0
+    assert timing["timer"] == "cuda_events"
+
+    backend._solve = lambda _cost, _validation: (torch.zeros_like(expected), torch.zeros_like(expected))  # type: ignore[attr-defined]
+    failure = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
+    assert failure == {"status": "parity_failed", "result_call": "kernel_warmup"}
+
+    calls = iter([(torch.zeros_like(expected), expected), (expected, torch.zeros_like(expected))])
+    backend._solve = lambda _cost, _validation: next(calls)  # type: ignore[attr-defined]
+    failure = benchmark._kernel_event_timing(Cost(), "triton", repetitions=2, expected=expected)  # type: ignore[arg-type]
+    assert failure == {"status": "parity_failed", "result_call": "kernel_timed:0"}
+
+
+def test_format_table_shows_kernel_only_time_beside_the_public_call() -> None:
+    """Prevent kernel-only evidence from staying hidden in the JSONL record."""
+    table = benchmark._format_table(
+        [
+            {
+                "backend": "public_cuda",
+                "status": "measured",
+                "timing": {"warm_ms": {"median": 2.0, "p95": 3.0}, "kernel_ms": {"median": 1.25}},
+            }
+        ]
+    )
+
+    assert "solver median ms" in table
+    assert "1.25" in table
+
+
+@pytest.mark.parametrize(
+    ("backend", "implementation", "label"),
+    [
+        ("public_cuda", "triton", "public_cuda/triton"),
+        ("public_cuda", "scipy_fallback", "public_cuda/scipy_fallback"),
+        ("triton", "triton", "triton"),
+        ("scipy", "scipy", "scipy"),
+        (None, None, "-"),
+    ],
+)
+def test_format_table_tells_the_public_call_from_the_private_triton_lane(
+    backend: str | None, implementation: str | None, label: str
+) -> None:
+    """Prevent the public call and the private Triton lane from printing as two identical rows."""
+    record = {"status": "measured", "backend": backend, "implementation": implementation}
+
+    table = benchmark._format_table([record])
+
+    assert table.splitlines()[1].split()[1] == label
+
+
+def _round_record(backend: str, process_round: int, warm: float, *, exact: bool = True) -> dict[str, Any]:
+    """Build one measured fresh-process round of the batch-2, 3 x 4 case."""
+    implementation = "triton" if backend != "scipy" else "scipy"
+    return {
+        "run_label": "current",
+        "backend": backend,
+        "implementation": implementation,
+        "validation_mode": "full",
+        "input_dtype": "float32",
+        "seed": 320,
+        "shape": {"batch": 2, "workers": 3, "tasks": 4},
+        "status": "measured",
+        "process_round": process_round,
+        "timing": {
+            "cold_first_call_ms": 100.0 + process_round,
+            "warm_ms": {"median": warm, "p95": warm + process_round},
+            **({"kernel_ms": {"median": warm / 2}} if backend != "scipy" else {}),
+        },
+        "parity": {"exact": exact},
+    }
+
+
+def test_summarize_rounds_prints_one_row_of_medians_per_case() -> None:
+    """Prevent a multi-round run from printing every round, which buries the comparison."""
+    skipped = {"status": "gpu_skipped", "details": ["no GPU"]}
+    records = [
+        *(_round_record("scipy", index, warm) for index, warm in enumerate([30.0, 10.0, 20.0])),
+        *(_round_record("public_cuda", index, warm) for index, warm in enumerate([2.0, 1.0, 4.0])),
+        skipped,
+    ]
+
+    scipy_row, public_row, skipped_row = benchmark._summarize_rounds(records)
+
+    assert scipy_row["process_rounds"] == public_row["process_rounds"] == 3
+    assert scipy_row["timing"]["warm_ms"] == {"median": 20.0, "p95": 30.0}
+    assert scipy_row["timing"]["cold_first_call_ms"] == 101.0
+    assert public_row["timing"]["kernel_ms"] == {"median": 1.0}
+    assert public_row["speedup_vs_scipy_cpu"] == {"warm_median": 10.0}
+    assert public_row["parity"] == {"exact": True}
+    assert skipped_row is skipped
+
+
+def test_summarize_rounds_never_lists_a_missing_round_as_none() -> None:
+    """Prevent a record without a round from adding a ``None`` id that skews the CPU pairing."""
+    record = _round_record("triton", 0, 1.0)
+    del record["process_round"]
+
+    (row,) = benchmark._summarize_rounds([record])
+
+    assert row["round_ids"] == [0]
+
+
+def test_summarize_rounds_reports_a_parity_miss_in_any_round() -> None:
+    """Prevent the median row from hiding one round that missed exact parity."""
+    records = [_round_record("triton", 0, 1.0), _round_record("triton", 1, 1.0, exact=False)]
+
+    (row,) = benchmark._summarize_rounds(records)
+
+    assert row["parity"] == {"exact": False}
+    assert "no" in benchmark._format_table([row]).splitlines()[1].split()
+
+
+def test_summarize_rounds_rejects_unpaired_and_failed_rounds() -> None:
+    """A failed round cannot leave an exact speedup in the aggregate."""
+    failed = _round_record("public_cuda", 0, 3.0, exact=False)
+    failed["status"] = "parity_failed"
+    records = [_round_record("scipy", 0, 10.0), _round_record("public_cuda", 1, 2.0), failed]
+
+    _, gpu, _ = benchmark._summarize_rounds(records)
+
+    assert gpu["parity"]["exact"] is False
+    assert "speedup_vs_scipy_cpu" not in gpu
+
+
+def test_summarize_rounds_marks_a_worker_failure_as_unknown_parity() -> None:
+    """A missing result cannot support an exact-parity claim."""
+    failed = _round_record("public_cuda", 1, 3.0)
+    failed["status"] = "worker_failed"
+    del failed["parity"]
+    records = [_round_record("scipy", 0, 10.0), _round_record("public_cuda", 0, 2.0), failed]
+
+    _, gpu, _ = benchmark._summarize_rounds(records)
+
+    assert gpu["parity"]["exact"] is None
+    assert "speedup_vs_scipy_cpu" not in gpu
 
 
 def test_process_statistics_require_every_fresh_process_round() -> None:
@@ -1146,6 +1415,82 @@ def test_main_allows_an_explicit_diagnostic_gpu_skip(
     assert json.loads(output.read_text())["status"] == "gpu_skipped"
 
 
+def _visible_gpu(monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int], name: str = "Tesla T4") -> None:
+    """Pretend one CUDA device with the given name and compute capability is visible."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device=None: capability)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device=None: name)
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected_implementation", "capability", "skipped"),
+    [
+        pytest.param(["scipy", "triton"], None, (7, 5), True, id="triton-backend-below-8.0"),
+        pytest.param(["scipy", "public_cuda"], "triton", (7, 5), True, id="expected-triton-below-8.0"),
+        pytest.param(["scipy", "public_cuda"], None, (7, 5), False, id="legacy-or-fallback-run-below-8.0"),
+        pytest.param(["scipy", "public_cuda", "triton"], "triton", (8, 0), False, id="supported-8.0"),
+    ],
+)
+def test_triton_ineligibility_skips_only_runs_that_need_a_supported_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+    backends: list[str],
+    expected_implementation: str | None,
+    capability: tuple[int, int],
+    skipped: bool,
+) -> None:
+    """Skip Triton evidence below compute capability 8.0, but keep legacy and fallback runs measurable."""
+    _visible_gpu(monkeypatch, capability)
+    arguments = argparse.Namespace(backends=backends, expect_implementation=expected_implementation)
+
+    reason = benchmark._triton_ineligibility(arguments)
+
+    if skipped:
+        assert reason is not None
+        assert "Tesla T4 (cuda:0) has compute capability 7.5" in reason
+        assert "requires 8.0 or newer" in reason
+    else:
+        assert reason is None
+
+
+def test_main_skips_an_ineligible_gpu_before_any_case_and_lists_the_limitation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A T4 must not spend minutes measuring cases that can never count as Triton evidence."""
+    output = tmp_path / "ineligible.jsonl"
+    monkeypatch.setattr(
+        benchmark,
+        "_arguments",
+        lambda: argparse.Namespace(
+            output=output,
+            backends=["scipy", "public_cuda", "triton"],
+            expect_implementation="triton",
+            label=None,
+            allow_incomplete=False,
+            worker_case=None,
+        ),
+    )
+    _visible_gpu(monkeypatch, (7, 5))
+
+    def unexpected_case(_specification: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("no case may run on an ineligible GPU")
+
+    monkeypatch.setattr(benchmark, "_isolated_case_record", unexpected_case)
+
+    with pytest.raises(SystemExit, match="1"):
+        benchmark.main()
+
+    record = json.loads(output.read_text())
+    assert record["status"] == "gpu_ineligible"
+    assert record["acceptance_eligible"] is False
+    assert "compute capability 7.5" in record["details"][0]
+    printed = capsys.readouterr().out
+    assert "gpu_ineligible" in printed
+    assert f"Limitations:\n- {record['details'][0]}" in printed
+
+
 def test_main_invalidates_every_case_in_an_allow_incomplete_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1271,7 +1616,7 @@ def test_main_exits_nonzero_after_parity_failure(
         worker_case=None,
     )
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     monkeypatch.setattr(
         benchmark,
         "_isolated_case_record",
@@ -1319,12 +1664,12 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
         label=None,
         worker_case=None,
     )
-    progress_calls: list[tuple[list[tuple[int, str, str, int, int, str]], dict[str, str]]] = []
+    progress_calls: list[tuple[list[tuple[int, str, str, int, int, int, str]], dict[str, str]]] = []
 
     def track_progress(
-        cases: list[tuple[int, str, str, int, int, str]],
+        cases: list[tuple[int, str, str, int, int, int, str]],
         **options: str,
-    ) -> list[tuple[int, str, str, int, int, str]]:
+    ) -> list[tuple[int, str, str, int, int, int, str]]:
         """Capture one materialized case matrix passed to the progress wrapper."""
         materialized = list(cases)
         progress_calls.append((materialized, options))
@@ -1332,7 +1677,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
 
     monkeypatch.setattr(benchmark, "tqdm", track_progress)
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     worker_specifications: list[dict[str, object]] = []
 
     def isolated_case_record(specification: dict[str, object]) -> dict[str, object]:
@@ -1352,7 +1697,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
     assert len(progress_calls) == 1
     cases, options = progress_calls[0]
     assert len(cases) == 24
-    assert cases[0] == (0, "scipy", "full", 1, 2, "float32")
-    assert cases[-1] == (0, "triton", "off", 4, 3, "float64")
+    assert cases[0] == (0, "scipy", "full", 1, 2, 2, "float32")
+    assert cases[-1] == (0, "triton", "off", 4, 2, 3, "float64")
     assert options == {"desc": "Benchmark cases", "unit": "case"}
     assert {specification["worker_timeout_seconds"] for specification in worker_specifications} == {37.5}

@@ -1,15 +1,20 @@
 PYTHON ?= python
 BENCHMARK_ARGS ?=
 
-.PHONY: help install install-legacy install-dev test benchmark benchmark-evidence validate validate-cpu validate-gpu validate-gpu-multi clean
+.PHONY: help install install-legacy install-dev install-rfdetr check-rfdetr test test-rfdetr benchmark benchmark-evidence benchmark-rfdetr benchmark-wide validate validate-cpu validate-gpu validate-gpu-multi clean
 
 help:
 	@echo "install      editable pure-source install"
 	@echo "install-legacy install and verify the exact PyPI 0.0.6 baseline"
 	@echo "install-dev  install plus the test tooling"
-	@echo "test         run the test suite"
+	@echo "install-rfdetr install-dev plus rfdetr, then verify the checkout is imported;"
+	@echo "             its torchvision pin installs torch 2.8.0 over the local build"
+	@echo "test         run the unit tests (tests/unittests)"
+	@echo "test-rfdetr  run the RF-DETR integration tests; fails if rfdetr is missing"
 	@echo "benchmark    run SciPy and available GPU benchmark comparisons"
 	@echo "benchmark-evidence record paired Triton validation, memory, and isolated cold evidence"
+	@echo "benchmark-rfdetr RF-DETR training shapes, with validation-off solver time"
+	@echo "benchmark-wide wide and square shapes, with validation-off solver time"
 	@echo "validate-cpu install-dev and test - runs anywhere"
 	@echo "validate-gpu GPU test and metadata lane - skips cleanly without a CUDA device"
 	@echo "validate-gpu-multi two-GPU compiled Triton acceptance - fails unless two eligible GPUs are visible"
@@ -36,8 +41,28 @@ install-legacy:
 install-dev: install
 	$(PYTHON) -m pip install pandas pytest tqdm
 
+# rfdetr goes in first and the checkout last with --no-deps, so nothing rfdetr
+# pulls in can replace the code under test. The check runs outside the checkout
+# so the working tree cannot satisfy the import by accident.
+install-rfdetr: install-dev
+	$(PYTHON) -m pip install "rfdetr==1.12.1" "torchvision==0.23.0"
+	$(PYTHON) -m pip install -e . --no-deps --no-build-isolation
+	$(MAKE) check-rfdetr
+
+check-rfdetr:
+	@set -e; \
+	verify_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$verify_dir"' EXIT; \
+	python_path=$$(command -v $(PYTHON)); \
+	python_path=$$(cd "$$(dirname "$$python_path")" && pwd)/$$(basename "$$python_path"); \
+	cd "$$verify_dir"; \
+	TLA_CHECKOUT="$(CURDIR)" "$$python_path" -c "import importlib.metadata as m, os; from pathlib import Path; import torch_linear_assignment as package, rfdetr.models.matcher, rfdetr.models._assignment; origin = Path(package.__file__).resolve(); checkout = Path(os.environ['TLA_CHECKOUT']).resolve(); expected = checkout / 'src/torch_linear_assignment/__init__.py'; assert origin == expected, f'torch_linear_assignment is not imported from the checkout: {origin}'; version = m.version('rfdetr'); assert version == '1.12.1', version; print(f'rfdetr {version} | torch_linear_assignment from {origin}')"
+
 test: install-dev
-	$(PYTHON) -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/unittests/ -v
+
+test-rfdetr: check-rfdetr
+	$(PYTHON) -m pytest tests/integrations/test_rfdetr.py tests/integrations/test_rfdetr_gpu.py -v
 
 benchmark:
 	@set -e; \
@@ -55,6 +80,14 @@ benchmark:
 
 benchmark-evidence:
 	$(MAKE) benchmark BENCHMARK_ARGS="--backends scipy,triton --workers 300 --tasks 100,300,600 --batches 208 --dtypes float32 --validation-modes off,nonfinite_only,infeasibility_flag_only,full --process-rounds 5 --backend-order alternate --warmup 3 --repetitions 30 --expect-implementation triton $(BENCHMARK_ARGS)"
+
+# Recorded baselines for kernel changes: the public call, the private Triton
+# backend with and without validation, and CUDA-event solver time per row.
+benchmark-rfdetr:
+	$(MAKE) benchmark BENCHMARK_ARGS="--preset rfdetr --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
+
+benchmark-wide:
+	$(MAKE) benchmark BENCHMARK_ARGS="--preset wide --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
 
 validate-cpu: test
 
@@ -77,7 +110,7 @@ validate-gpu-multi: install-dev
 	@set -e; \
 	$(PYTHON) -c "import importlib, importlib.metadata as m, importlib.util as u, platform, re, sys, torch; triton = m.version('triton') if u.find_spec('triton') else 'unavailable'; print('Python:', sys.version.replace(chr(10), ' ')); print(f'Platform: {platform.platform()}'); print(f'Torch: {torch.__version__}'); print(f'Torch CUDA: {torch.version.cuda}'); print(f'Triton: {triton}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); [print(f'GPU {index}: name={torch.cuda.get_device_properties(index).name} | compute_capability={torch.cuda.get_device_capability(index)[0]}.{torch.cuda.get_device_capability(index)[1]} | total_memory_bytes={torch.cuda.get_device_properties(index).total_memory} | multiprocessors={torch.cuda.get_device_properties(index).multi_processor_count}') for index in range(torch.cuda.device_count())]; version = re.match(r'(\\d+)\\.(\\d+)', torch.__version__); eligible = [index for index in range(torch.cuda.device_count()) if torch.cuda.get_device_capability(index) >= (8, 0)]; valid = sys.platform == 'linux' and torch.cuda.is_available() and torch.version.cuda is not None and version is not None and tuple(map(int, version.groups())) >= (2, 4) and u.find_spec('triton') is not None and len(eligible) >= 2; sys.exit(0 if valid else 'validate-gpu-multi requires Linux, CUDA-enabled PyTorch 2.4+, Triton, and at least two visible GPUs with compute capability >= 8.0')"; \
 	if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi; else echo "nvidia-smi: unavailable"; fi; \
-	$(PYTHON) -m pytest -v tests/test_triton.py::test_batch_linear_assignment_compiled_isolates_two_cuda_devices
+	$(PYTHON) -m pytest -v tests/unittests/test_triton.py::test_batch_linear_assignment_compiled_isolates_two_cuda_devices
 
 validate: export CUDA_LAUNCH_BLOCKING := 1
 validate: validate-cpu validate-gpu

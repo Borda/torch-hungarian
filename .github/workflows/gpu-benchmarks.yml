@@ -1,0 +1,143 @@
+name: Modal GPU Benchmarks
+
+# Runs the benchmark presets on a Modal GPU and reports the results table:
+# on manual dispatch to the run summary, and on the `gpu-benchmarks` pull
+# request label also as a pull request comment. A run costs real money and needs
+# the Modal credentials, so it never runs on push. The label trigger is
+# deliberately `pull_request` and never `pull_request_target`: GitHub withholds
+# secrets from fork pull requests, so untrusted code cannot reach the Modal
+# credentials even if the label is applied by mistake.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to benchmark"
+        required: false
+        default: ""
+      gpu:
+        description: "Modal GPU request; compute capability 8.0+ only, so no T4"
+        required: false
+        default: "L4"
+      preset:
+        description: "Benchmark preset to run"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "rfdetr", "wide"]
+      benchmark_args:
+        description: "Extra benchmark arguments, such as --process-rounds 1"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # A choice input, so only known preset names can reach the expression.
+  PRESETS: ${{ (github.event_name == 'workflow_dispatch' && inputs.preset != 'all') && format('["{0}"]', inputs.preset) || '["rfdetr","wide"]' }}
+
+jobs:
+  benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'gpu-benchmarks'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.preset != 'all') && format('["{0}"]', inputs.preset) || '["rfdetr","wide"]') }}
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+
+    # Only the Modal client runs here; the benchmark environment is built inside
+    # the Modal image from the pinned dependency groups.
+    - name: Set up uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        version: "0.9.26"
+        enable-cache: false
+
+    - name: Install the Modal client
+      run: uv pip install --system --group modal
+
+    - name: Run the benchmark preset on Modal
+      env:
+        MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+        MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        # See _modal-gpu-tests.yml: the default builder's Debian 11 base fails apt.
+        MODAL_IMAGE_BUILDER_VERSION: "2025.06"
+        MODAL_ENVIRONMENT: torch-hungarian
+        MODAL_GPU: ${{ inputs.gpu || 'L4' }}
+        # Passed through the environment rather than interpolated into the
+        # command line, so workflow inputs cannot inject shell syntax.
+        PRESET: ${{ matrix.preset }}
+        BENCHMARK_ARGS: ${{ inputs.benchmark_args }}
+      run: >-
+        modal run .modal/test_runner.py
+        --benchmark-preset "$PRESET"
+        --benchmark-args="$BENCHMARK_ARGS"
+
+    - name: Upload the benchmark results
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: gpu-benchmark-${{ matrix.preset }}
+        path: test-outputs/
+        if-no-files-found: ignore
+
+  report:
+    needs: benchmark
+    if: always() && needs.benchmark.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+    # Only the report script is needed. It comes from the same ref the benchmark ran, so a
+    # change to the script is exercised by the pull request that makes it.
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
+        sparse-checkout: .github/scripts
+        persist-credentials: false
+
+    - name: Download the benchmark results
+      continue-on-error: true
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      with:
+        pattern: gpu-benchmark-*
+        merge-multiple: true
+        path: test-outputs
+
+    - name: Report the results
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      env:
+        JOB_RESULT: ${{ needs.benchmark.result }}
+        GPU: ${{ inputs.gpu || 'L4' }}
+      with:
+        script: |
+          const report = require('./.github/scripts/gpu-benchmark-report.js');
+          await report.report({ github, context, core });
+
+    - name: Remove the trigger label
+      if: always() && github.event_name == 'pull_request'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      continue-on-error: true
+      with:
+        script: |
+          await github.rest.issues.removeLabel({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.pull_request.number,
+            name: 'gpu-benchmarks',
+          });

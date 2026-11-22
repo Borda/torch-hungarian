@@ -48,6 +48,15 @@ develop = [
     "pytest==9.1.1",
     "tqdm==4.67.1",
 ]
+# RF-DETR integration tests (tests/integrations/test_rfdetr*.py). The base rfdetr install is
+# enough; its `train` extra pins an older torch-hungarian that would replace the
+# checkout under test. torchvision is pinned to the release built against the
+# develop torch pin. Install it through `make install-rfdetr`, which installs
+# the checkout afterwards with --no-deps and asserts which copy is imported.
+rfdetr = [
+    "rfdetr==1.12.1",
+    "torchvision==0.23.0",
+]
 # Modal client for the hosted GPU lane in .github/workflows/_modal-gpu-tests.yml.
 # Kept as its own group so dependency updates can bump it independently.
 modal = [

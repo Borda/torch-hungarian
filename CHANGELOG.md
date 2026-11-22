@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Split the suite into `tests/unittests/` for the package's own tests and `tests/integrations/` for tests against downstream projects. `make test` and the CPU matrix run the unit tests; the Modal lane runs both. The compiled-kernel host checks move to `tests/_triton_eligibility.py`, shared by both suites.
+- Test the RF-DETR integration against RF-DETR's own SciPy matcher. `tests/integrations/test_rfdetr.py` compares RF-DETR 1.12.1's batched solve with its per-problem SciPy oracle at training shapes: 300 queries in 13 groups, 0 to 30 targets per image, several decoder layers, more targets than queries per group, and mixed query counts. Continuous costs must return the oracle's exact index pairs, and tied costs its objective. `tests/integrations/test_rfdetr_gpu.py` repeats the comparison on the Triton kernel and checks RF-DETR's CUDA matcher, single- and multi-layer, against the host matcher; each test asserts that the kernel ran, so an unsupported GPU cannot turn it into SciPy against SciPy.
+- Add an `rfdetr` dependency group and `make install-rfdetr`, which installs the checkout after RF-DETR with `--no-deps` and fails unless the package is imported from the checkout. RF-DETR's `train` extra pins an older `torch-hungarian` and is not used. A separate CPU workflow job runs the host tests, and the Modal GPU image installs the group and checks the import origin at build time.
+- Add `--preset rfdetr` and `--preset wide` to the benchmark, with `make benchmark-rfdetr`, `make benchmark-wide`, and `modal run .modal/test_runner.py --benchmark-preset <name>`. A preset is a list of explicit `(batch, workers, tasks)` shapes, so one run can mix worker counts. Every Triton row also reports validation-off solver time from CUDA events, including workspace initialization, with dtype promotion, transpose, validation, and result conversion kept outside the timed window.
+- Add a GPU benchmark workflow, `gpu-benchmarks.yml`, that runs the presets on Modal through manual dispatch or the maintainer-applied `gpu-benchmarks` pull request label. It writes the results table and every unmeasured record to the run summary, comments them on the pull request for the label, uploads the JSONL records, and removes the label. The Modal runner now also saves the printed table as `test-outputs/benchmark-<preset>.txt`.
+- Skip benchmark runs that measure the Triton backend, or expect the public call to use it, on a GPU below compute capability 8.0, such as a T4. The run writes one `gpu_ineligible` record naming the device and its capability before any case starts, prints it under a new `Limitations` list, and exits nonzero unless `--allow-incomplete` is given, like the existing no-GPU skip. A `public_cuda`-only run still measures a legacy build or the SciPy fallback on such a GPU.
+
+### Changed
+
+- Print one benchmark table row per case instead of one per process round. Warm, kernel, and cold times are medians across rounds, warm p95 is the worst round's, parity is exact only when every round was, and the speedup is recomputed from the medians; skipped and failed records still print individually, and the JSONL keeps every round.
+- Mark the pull request comments from the Modal runs with a green check or a red cross: the title and job result of the `gpu-tests` and `gpu-benchmarks` comments, and each benchmark preset heading, which takes its outcome from that preset's own matrix job. The benchmark report job gains `actions: read` for this, and its comment is bounded below GitHub's size limit, with the label removed even when posting fails. The report moves out of the workflow into `.github/scripts/gpu-benchmark-report.js`, which `.github/scripts/gpu-benchmark-report.test.js` covers with Node's built-in test runner in a new `workflow-scripts` job of the CPU workflow.
+- Name both the lane and the implementation in the benchmark table's backend column when they differ, so the public call reads `public_cuda/triton` and no longer prints the same label as the private `triton` lane.
+
 ## 0.1.0 - 2026-11-21
 
 ### Added
