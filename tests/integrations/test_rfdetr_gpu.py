@@ -78,6 +78,9 @@ def test_batched_kernel_solve_matches_the_scipy_oracle(
     if any(problem.sizes):
         widths = set(problem.group_widths)
         if len(widths) > 1 or max(problem.sizes) > min(widths):
+            # `_solve` is reached after the wrapper transposes a tall problem, so it always sees
+            # (rows, cols) with rows <= cols, which is the sorted pair whichever way round RF-DETR
+            # built the bucket.
             shapes = {tuple(sorted((width, size))) for width in widths for size in problem.sizes if size}
             assert set(kernel_calls) == shapes, "a nonempty bucket did not launch the Triton kernel"
         else:
