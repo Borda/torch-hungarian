@@ -47,7 +47,9 @@ jobs:
           const path = 'test-outputs/pytest-output.log';
           const jobResult = process.env.GPU_JOB_RESULT;
 
-          let comment = `## GPU test results\n\n**Job result:** \`${jobResult}\`\n\n`;
+          // A green check or a red cross up front, so the outcome is clear while scrolling the thread.
+          const icon = jobResult === 'success' ? '✅' : '❌';
+          let comment = `## ${icon} GPU test results\n\n**Job result:** ${icon} \`${jobResult}\`\n\n`;
 
           if (fs.existsSync(path)) {
             // eslint-disable-next-line no-control-regex

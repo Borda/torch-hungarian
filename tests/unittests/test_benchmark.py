@@ -728,6 +728,16 @@ def test_summarize_rounds_prints_one_row_of_medians_per_case() -> None:
     assert skipped_row is skipped
 
 
+def test_summarize_rounds_never_lists_a_missing_round_as_none() -> None:
+    """Prevent a record without a round from adding a ``None`` id that skews the CPU pairing."""
+    record = _round_record("triton", 0, 1.0)
+    del record["process_round"]
+
+    (row,) = benchmark._summarize_rounds([record])
+
+    assert row["round_ids"] == [0]
+
+
 def test_summarize_rounds_reports_a_parity_miss_in_any_round() -> None:
     """Prevent the median row from hiding one round that missed exact parity."""
     records = [_round_record("triton", 0, 1.0), _round_record("triton", 1, 1.0, exact=False)]

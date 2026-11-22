@@ -14,6 +14,7 @@
 ### Changed
 
 - Print one benchmark table row per case instead of one per process round. Warm, kernel, and cold times are medians across rounds, warm p95 is the worst round's, parity is exact only when every round was, and the speedup is recomputed from the medians; skipped and failed records still print individually, and the JSONL keeps every round.
+- Mark the pull request comments from the Modal runs with a green check or a red cross: the title and job result of the `gpu-tests` and `gpu-benchmarks` comments, and each benchmark preset heading, which takes its outcome from that preset's own matrix job. The benchmark report job gains `actions: read` for this, and its comment is bounded below GitHub's size limit, with the label removed even when posting fails. The report moves out of the workflow into `.github/scripts/gpu-benchmark-report.js`, which `.github/scripts/gpu-benchmark-report.test.js` covers with Node's built-in test runner in a new `workflow-scripts` job of the CPU workflow.
 - Name both the lane and the implementation in the benchmark table's backend column when they differ, so the public call reads `public_cuda/triton` and no longer prints the same label as the private `triton` lane.
 
 ## 0.1.0 - 2026-11-21

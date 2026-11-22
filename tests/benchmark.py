@@ -771,7 +771,8 @@ def _summarize_case_rounds(group: list[dict[str, Any]]) -> dict[str, Any]:
         "timing": timing,
         "parity": {"exact": False if False in exact else True if all(value is True for value in exact) else None},
         "process_rounds": len(group),
-        "round_ids": [record.get("process_round") for record in group],
+        # The default matches `_case_key`, so a record without a round never adds a `None` id.
+        "round_ids": [record.get("process_round", 0) for record in group],
     }
 
 

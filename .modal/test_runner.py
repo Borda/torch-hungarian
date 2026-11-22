@@ -327,6 +327,8 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     print(f"{_SEPARATOR}\nEXIT CODE: {process.returncode}\n{_SEPARATOR}")
     return {
         "returncode": process.returncode,
+        # Fail closed: without --allow-incomplete a zero exit always wrote records, so an empty
+        # file means the run left no evidence, and a clean skip cannot pass for a measured run.
         "success": process.returncode == 0 and bool(records.strip()),
         "pytest_output": records,
         "summary": process.stdout,
