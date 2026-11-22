@@ -265,7 +265,8 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     """Run one benchmark preset on a Modal GPU and return its JSONL records.
 
     The benchmark compares SciPy, the public call and the private Triton backend
-    (validation ``full`` and ``off``) in fresh processes, and fails closed on any
+    (all four validation modes, which the validation-overhead gate requires) in
+    fresh processes, and fails closed on any
     parity mismatch or incomplete case, so a zero return code is the evidence.
 
     Args:
@@ -301,8 +302,6 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
         "scipy,public_cuda,triton",
         "--dtypes",
         "float32",
-        "--validation-modes",
-        "full,off",
         "--expect-implementation",
         "triton",
         "--output",

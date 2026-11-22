@@ -518,6 +518,20 @@ def test_default_arguments_keep_the_single_worker_cross_product(monkeypatch: pyt
     ]
 
 
+def test_default_validation_modes_satisfy_the_validation_overhead_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that leaves validation modes at their default must be able to pass the completeness gate."""
+    monkeypatch.setattr(sys, "argv", ["benchmark.py", "--preset", "rfdetr", "--backends", "scipy,public_cuda,triton"])
+
+    arguments = benchmark._arguments()
+
+    triton_modes: dict[tuple[int, int, int], set[str]] = {}
+    for _, backend, validation, batch, workers, tasks, _ in benchmark._case_matrix(arguments):
+        if backend == "triton":
+            triton_modes.setdefault((batch, workers, tasks), set()).add(validation)
+    assert triton_modes
+    assert all(modes == set(benchmark._VALIDATION_MODES) for modes in triton_modes.values())
+
+
 @pytest.mark.parametrize(
     ("preset", "expected"),
     [

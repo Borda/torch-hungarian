@@ -82,10 +82,10 @@ benchmark-evidence:
 # Recorded baselines for kernel changes: the public call, the private Triton
 # backend with and without validation, and kernel-only CUDA-event time per row.
 benchmark-rfdetr:
-	$(MAKE) benchmark BENCHMARK_ARGS="--preset rfdetr --backends scipy,public_cuda,triton --dtypes float32 --validation-modes full,off $(BENCHMARK_ARGS)"
+	$(MAKE) benchmark BENCHMARK_ARGS="--preset rfdetr --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
 
 benchmark-wide:
-	$(MAKE) benchmark BENCHMARK_ARGS="--preset wide --backends scipy,public_cuda,triton --dtypes float32 --validation-modes full,off $(BENCHMARK_ARGS)"
+	$(MAKE) benchmark BENCHMARK_ARGS="--preset wide --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
 
 validate-cpu: test
 
