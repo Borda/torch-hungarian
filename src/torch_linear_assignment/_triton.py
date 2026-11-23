@@ -10,7 +10,10 @@ Scope:
     One Triton program solves one batch item. The program is intentionally
     correctness-first: outer augmenting-path steps remain sequential while each
     current set of candidate columns is processed as a masked lane vector.
-    Per-search state remains program-local. The correctness launch currently
+    Per-search state remains program-local. Runtime matrix dimensions allow shapes
+    in a column bucket to share a compiled variant for a fixed target, dtype and
+    pointer alignment. Each program uses row offsets only when every finite
+    subtraction is safe. The correctness launch currently
     keeps its loop-carried vectors within one warp; wider launch configurations
     remain gated on exact GPU parity. Its ordering reproduces the legacy CUDA
     and SciPy rectangular-LSAP algorithm.
@@ -50,7 +53,8 @@ ValidationMode = Literal["full", "off", "nonfinite_only", "infeasibility_flag_on
 _VALIDATION_MODES: frozenset[str] = frozenset({"full", "off", "nonfinite_only", "infeasibility_flag_only"})
 
 
-@triton.jit
+# Runtime matrix dimensions remove row and column counts as separate specialization keys.
+@triton.jit(do_not_specialize=["NUM_ROWS", "NUM_COLUMNS"])
 def _linear_assignment_kernel(
     cost,
     u,
@@ -58,8 +62,9 @@ def _linear_assignment_kernel(
     col4row,
     row4col,
     infeasible,
-    NUM_ROWS: tl.constexpr,
-    NUM_COLUMNS: tl.constexpr,
+    rowmin,
+    NUM_ROWS,
+    NUM_COLUMNS,
     BLOCK_N: tl.constexpr,
     IS_FP64: tl.constexpr,
 ):
@@ -75,6 +80,23 @@ def _linear_assignment_kernel(
     v = v + batch_index * NUM_COLUMNS
     col4row = col4row + batch_index * NUM_ROWS
     row4col = row4col + batch_index * NUM_COLUMNS
+    rowmin = rowmin + batch_index * NUM_ROWS
+
+    # Every solver row is assigned once. Sterbenz's lemma guarantees exact subtraction
+    # when positive finite costs are within a factor of two of their row minimum.
+    # If any row is unsafe, keep the original search arithmetic for the whole matrix.
+    can_reduce = True
+    for reduce_row in tl.range(0, NUM_ROWS, num_stages=1):
+        row_costs = tl.load(cost + reduce_row * NUM_COLUMNS + lane, mask=column_mask, other=float("inf"))
+        row_minimum = tl.min(row_costs, axis=0)
+        # Padding and forbidden edges must not participate in the finite maximum.
+        row_maximum = tl.max(tl.where(row_costs < float("inf"), row_costs, -float("inf")), axis=0)
+        all_forbidden = row_minimum == float("inf")
+        exact_shift = (row_minimum > 0.0) & (row_maximum <= 2.0 * row_minimum)
+        can_reduce = can_reduce & (all_forbidden | (row_minimum == 0.0) | exact_shift)
+        tl.store(rowmin + reduce_row, tl.where(all_forbidden, 0.0, row_minimum))
+    # The search below reads the minima written above.
+    tl.debug_barrier()
 
     for current_row in tl.range(0, NUM_ROWS, num_stages=1):
         scanned_rows = tl.zeros((BLOCK_N,), tl.int1)
@@ -106,10 +128,14 @@ def _linear_assignment_kernel(
             reduced_cost = (
                 min_value
                 - tl.load(u + search_row)
-                + tl.load(
-                    cost + search_row * NUM_COLUMNS + lane,
-                    mask=candidate_mask,
-                    other=float("inf"),
+                # Apply the verified shift before adding the path and potential terms.
+                + (
+                    tl.load(
+                        cost + search_row * NUM_COLUMNS + lane,
+                        mask=candidate_mask,
+                        other=float("inf"),
+                    )
+                    - tl.load(rowmin + search_row, mask=can_reduce, other=0.0)
                 )
                 - tl.load(v + lane, mask=candidate_mask, other=0.0)
             )
@@ -250,18 +276,44 @@ def _empty_assignment(cost: torch.Tensor) -> torch.Tensor:
     return torch.full((batch_size, workers), -1, dtype=torch.long, device=cost.device)
 
 
+# Elements between section starts. Triton compiles one binary per pointer-divisibility pattern, and
+# a section start is only 16-byte aligned when its offset is, so an unpadded packed buffer would
+# compile a new binary for batch sizes whose offsets differ in alignment.
+_SECTION_ALIGNMENT = 4
+
+
+def _padded(count: int) -> int:
+    """Round an element count up so the next section starts on a 16-byte boundary."""
+    return -(-count // _SECTION_ALIGNMENT) * _SECTION_ALIGNMENT
+
+
+def _padded_total(counts: tuple[int, ...]) -> int:
+    """Return the buffer length that holds sections of the given sizes at aligned starts."""
+    return sum(_padded(count) for count in counts)
+
+
+def _sections(buffer: torch.Tensor, counts: tuple[int, ...]) -> list[torch.Tensor]:
+    """Slice one flat buffer into sections of the given sizes, each starting aligned."""
+    sections, start = [], 0
+    for count in counts:
+        sections.append(buffer[start : start + count])
+        start += _padded(count)
+    return sections
+
+
 def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch the one-program-per-batch kernel and return both assignment views."""
     batch_size, rows, columns = cost.shape
     block_n = triton.next_power_of_2(columns)
-    workspace_options = {"device": cost.device}
-    scalar_options = {**workspace_options, "dtype": cost.dtype}
-    integer_options = {**workspace_options, "dtype": torch.int32}
-    u = torch.zeros((batch_size, rows), **scalar_options)
-    v = torch.zeros((batch_size, columns), **scalar_options)
-    col4row = torch.full((batch_size, rows), -1, **integer_options)
-    row4col = torch.full((batch_size, columns), -1, **integer_options)
-    infeasible = torch.zeros((batch_size,), **integer_options)
+    # Two allocations instead of five: one float block (potentials and row minima) and one int32
+    # block (assignments and the infeasibility flags), sliced into the kernel's workspaces.
+    float_counts = (batch_size * rows, batch_size * columns, batch_size * rows)
+    int_counts = (batch_size * rows, batch_size * columns, batch_size)
+    floats = torch.zeros(_padded_total(float_counts), device=cost.device, dtype=cost.dtype)
+    ints = torch.full((_padded_total(int_counts),), -1, device=cost.device, dtype=torch.int32)
+    u, v, rowmin = _sections(floats, float_counts)
+    col4row, row4col, infeasible = _sections(ints, int_counts)
+    infeasible.zero_()
 
     _linear_assignment_kernel[(batch_size,)](
         cost,
@@ -270,6 +322,7 @@ def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor
         col4row,
         row4col,
         infeasible,
+        rowmin,
         NUM_ROWS=rows,
         NUM_COLUMNS=columns,
         BLOCK_N=block_n,
@@ -280,7 +333,7 @@ def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor
     )
     if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.any().item()):
         raise ValueError("cost matrix is infeasible")
-    return col4row, row4col
+    return col4row.view(batch_size, rows), row4col.view(batch_size, columns)
 
 
 def batch_linear_assignment(

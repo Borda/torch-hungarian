@@ -1639,6 +1639,29 @@ def test_main_exits_nonzero_after_parity_failure(
     assert f"JSONL results: {output.resolve()}" in stdout
 
 
+@pytest.mark.parametrize(
+    ("total", "first", "lines"),
+    [
+        pytest.param(36, 2, 18, id="wide-two-rounds"),
+        pytest.param(37, 2, 19, id="partial-final-interval"),
+        pytest.param(7, 1, 7, id="short-run"),
+    ],
+)
+def test_nonterminal_progress_writes_bounded_completion_lines(
+    capsys: pytest.CaptureFixture[str], total: int, first: int, lines: int
+) -> None:
+    """Capture real stderr milestones through completion without terminal control characters."""
+    cases = [(0, "scipy", "full", 1, 2, 2, "float32")] * total
+
+    assert list(benchmark._benchmark_progress(cases, interactive=False)) == cases
+
+    output = capsys.readouterr().err
+    expected_counts = [*range(first, total, first), total]
+    assert "\r" not in output
+    assert output.count("\n") == lines
+    assert output.splitlines() == [f"Benchmark cases: {completed}/{total}" for completed in expected_counts]
+
+
 def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1676,6 +1699,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
         return materialized
 
     monkeypatch.setattr(benchmark, "tqdm", track_progress)
+    monkeypatch.setattr(benchmark.sys.stderr, "isatty", lambda: True)
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
     _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     worker_specifications: list[dict[str, object]] = []

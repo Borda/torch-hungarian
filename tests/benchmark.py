@@ -1444,6 +1444,22 @@ def _skip_run(
         raise SystemExit(1)
 
 
+def _benchmark_progress(
+    cases: list[tuple[int, str, str, int, int, int, str]], *, interactive: bool
+) -> Iterable[tuple[int, str, str, int, int, int, str]]:
+    """Yield cases with a live terminal bar or up to twenty completed-case log lines."""
+    if interactive:
+        yield from tqdm(cases, desc="Benchmark cases", unit="case")
+        return
+
+    total = len(cases)
+    interval = max(1, (total + 19) // 20)
+    for completed, case in enumerate(cases, start=1):
+        yield case
+        if completed % interval == 0 or completed == total:
+            print(f"Benchmark cases: {completed}/{total}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     """Run the configured matrix and emit structured evidence or skip rows."""
     arguments = _arguments()
@@ -1469,8 +1485,8 @@ def main() -> None:
         return
 
     cases = _case_matrix(arguments)
-    for process_round, backend, validation, batch, workers, tasks, dtype_name in tqdm(
-        cases, desc="Benchmark cases", unit="case"
+    for process_round, backend, validation, batch, workers, tasks, dtype_name in _benchmark_progress(
+        cases, interactive=sys.stderr.isatty()
     ):
         specification = {
             "run_id": run_id,

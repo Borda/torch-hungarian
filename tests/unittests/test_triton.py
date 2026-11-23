@@ -7,6 +7,11 @@ device-selection test, which needs the public dispatch and asserts that the comp
 """
 
 import importlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -464,3 +469,134 @@ def test_batch_linear_assignment_compiled_offsets_stay_exact_past_two_to_the_31_
             expected = backend.batch_linear_assignment(cost[batch_slice].contiguous(), validation="off")
             assert torch.equal(actual[batch_slice], expected)
     assert torch.equal(actual[-4:].cpu(), _scipy_assignment(cost[-4:]))
+
+
+@pytest.mark.parametrize("offset", [1.0, 1e2, 1e4, 1e6])
+@pytest.mark.parametrize("size", [32, 100, 256])
+def test_batch_linear_assignment_compiled_float32_offsets_match_scipy(
+    triton_backend_device: tuple[object, torch.device], size: int, offset: float
+) -> None:
+    """Prevent float32 potentials on large cost offsets from returning a strictly worse assignment."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(size + int(offset))
+    cost = offset + torch.rand((8, size, size), generator=generator)
+    expected = _scipy_assignment(cost)
+
+    with torch.cuda.device(device):
+        actual = backend.batch_linear_assignment(cost.to(device)).cpu()
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("matrix", "dtype"),
+    [
+        pytest.param([[-1e8, 1], [-1e8, 2]], torch.float32, id="signed-float32"),
+        pytest.param([[1.375, 16777216], [0.625, 16777216]], torch.float32, id="wide-float32"),
+        pytest.param([[-1e308, 1e308], [-1e308, 1e308]], torch.float64, id="finite-float64-overflow"),
+        pytest.param([[-1e308, float("inf")], [-1e308, 1e308]], torch.float64, id="finite-and-forbidden-float64"),
+        pytest.param(
+            [[1.375, 16777216, float("inf")], [0.625, 16777216, float("inf")], [8, 9, 7]],
+            torch.float32,
+            id="mixed-safe-and-unsafe-float32",
+        ),
+        pytest.param(
+            [[1024.5, float("inf"), 1024.25], [1024.75, 1024.125, float("inf")]],
+            torch.float32,
+            id="common-offset-with-padding-and-forbidden-edges",
+        ),
+    ],
+)
+def test_batch_linear_assignment_compiled_preserves_finite_costs(
+    triton_backend_device: tuple[object, torch.device], matrix: list[list[float]], dtype: torch.dtype
+) -> None:
+    """Preserve the SciPy assignment when a row shift could round or overflow finite costs."""
+    backend, device = triton_backend_device
+    cost = torch.tensor([matrix], dtype=dtype)
+    expected = _scipy_assignment(cost)
+
+    with torch.cuda.device(device):
+        actual = backend.batch_linear_assignment(cost.to(device)).cpu()
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64, torch.int32])
+def test_batch_linear_assignment_compiled_matches_scipy_on_random_shapes(
+    triton_backend_device: tuple[object, torch.device], dtype: torch.dtype
+) -> None:
+    """Prevent the runtime-dimension kernel from drifting on any batch, row or column count."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(40)
+    for _ in range(40):
+        batch_size, workers, tasks = (int(value) for value in torch.randint(1, 150, (3,), generator=generator))
+        batch_size = batch_size % 16 + 1
+        raw = torch.rand((batch_size, workers, tasks), generator=generator) * 50
+        cost = raw.floor().to(dtype) if dtype == torch.int32 else raw.to(dtype)
+
+        with torch.cuda.device(device):
+            actual = backend.batch_linear_assignment(cost.to(device)).cpu()
+
+        assert torch.equal(actual, _scipy_assignment(cost)), f"{dtype} {tuple(cost.shape)}"
+
+
+@pytest.mark.parametrize("tasks", [1, 7, 30])
+def test_batch_linear_assignment_compiled_matches_scipy_on_tied_costs_at_matcher_shapes(
+    triton_backend_device: tuple[object, torch.device], tasks: int
+) -> None:
+    """Prevent the in-kernel row reduction from moving a tie-break on RF-DETR's tall, tied batches."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(tasks)
+    cost = torch.randint(0, 3, (13, 300, tasks), generator=generator).float()
+    expected = _scipy_assignment(cost)
+
+    with torch.cuda.device(device):
+        actual = backend.batch_linear_assignment(cost.to(device)).cpu()
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        pytest.param(
+            [(3, 300, 1), (5, 300, 2), (7, 300, 5), (11, 300, 9), (13, 300, 17), (17, 300, 30)], id="one-bucket"
+        ),
+        pytest.param(
+            [(3, 40, 20), (5, 100, 50), (7, 200, 150), (9, 300, 300), (11, 60, 20), (13, 500, 400), (15, 129, 40)],
+            id="mixed-buckets",
+        ),
+    ],
+)
+def test_batch_linear_assignment_compiled_builds_one_binary_per_column_bucket(
+    triton_backend_device: tuple[object, torch.device], tmp_path: Path, shapes: list[tuple[int, int, int]]
+) -> None:
+    """Prevent a new compile per target count, or per batch size through unaligned workspace pointers."""
+    backend, device = triton_backend_device
+    backend_path = Path(backend.__file__).resolve()
+    program = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "backend_path = Path(sys.argv[3])\n"
+        "sys.path.insert(0, str(backend_path.parent.parent))\n"
+        "import torch\n"
+        "from torch_linear_assignment import _triton as backend\n"
+        "if Path(backend.__file__).resolve() != backend_path:\n"
+        "    raise RuntimeError(f'Unexpected Triton backend: {backend.__file__}')\n"
+        "torch.cuda.set_device(int(sys.argv[1]))\n"
+        "for shape in json.loads(sys.argv[2]):\n"
+        "    backend.batch_linear_assignment(torch.rand(shape, device='cuda'), validation='off')\n"
+        "torch.cuda.synchronize()\n"
+    )
+    # A fresh cache makes every binary this run needs appear here, whatever earlier tests compiled.
+    env = {**os.environ, "TRITON_CACHE_DIR": str(tmp_path)}
+    subprocess.run(
+        [sys.executable, "-B", "-c", program, str(device.index or 0), json.dumps(shapes), str(backend_path)],
+        check=True,
+        env=env,
+        timeout=900,
+    )
+
+    # Hold target, dtype and input alignment fixed while varying the runtime dimensions.
+    buckets = {1 << (max(workers, tasks) - 1).bit_length() for _, workers, tasks in shapes}
+    assert len(list(tmp_path.rglob("*.cubin"))) == len(buckets)

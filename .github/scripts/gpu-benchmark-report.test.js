@@ -93,6 +93,14 @@ test('buildReport marks the run and each preset with its own outcome', () => {
   assert.match(body, /\[Workflow run\]\(https:\/\/run\)$/);
 });
 
+test('buildReport puts the tested commit line under the job result, and nothing when there is none', () => {
+  const line = '**Tested commit:** [`aaaaaaa`](https://c) · 2 commits behind the pull request head';
+  const outputDir = outputs({});
+  const { body, comment } = build({ commitLine: line, outputDir });
+  for (const text of [body, comment]) assert.match(text, /GPU:\*\* L4\n\n\*\*Tested commit:\*\* \[`aaaaaaa`\]/);
+  assert.doesNotMatch(build({ outputDir }).body, /Tested commit/);
+});
+
 test('buildReport falls back to the overall result for a preset without a job result', () => {
   const dir = outputs({ 'benchmark-rfdetr.txt': 'table', 'benchmark-wide.txt': 'table' });
   const { body } = build({ outputDir: dir });
