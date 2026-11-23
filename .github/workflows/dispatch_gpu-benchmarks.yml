@@ -12,15 +12,17 @@ on:
         required: false
         default: ""
       gpu:
-        description: "Modal GPU request; compute capability 8.0+ only, so no T4"
+        description: "Modal GPU type; compute capability 8.0+ only, so no T4. One type per run, so timings stay comparable; use H100 or A100 to fill that GPU's README rows"
         required: false
         default: "L4"
+        type: choice
+        options: ["L4", "A10", "L40S", "A100", "H100"]
       preset:
-        description: "Benchmark preset to run"
+        description: "Benchmark preset to run; all means rfdetr and wide, and readme (the README table shapes) runs only when chosen"
         required: false
         default: "all"
         type: choice
-        options: ["all", "rfdetr", "wide"]
+        options: ["all", "rfdetr", "wide", "readme"]
       benchmark_args:
         description: "Extra benchmark arguments, such as --process-rounds 1"
         required: false

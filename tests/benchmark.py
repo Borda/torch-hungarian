@@ -65,6 +65,10 @@ _PRESETS: dict[str, tuple[tuple[int, int, int], ...]] = {
     "rfdetr": tuple((batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)),
     # Wide, square, and many-small-problem shapes, where kernel-side changes cost the most.
     "wide": ((208, 300, 300), (208, 300, 600), (208, 512, 512), (832, 300, 60)),
+    # The three batch-208 orientations of the README's representative performance table, so a GPU
+    # class can be added to it from one run. Run it with five process rounds, three warmup calls and
+    # thirty repetitions, which `make benchmark-readme` and the Modal lane both do.
+    "readme": ((208, 300, 100), (208, 300, 300), (208, 300, 600)),
 }
 
 #: Lowest NVIDIA compute capability the package runs Triton on; below it the public call uses SciPy.
