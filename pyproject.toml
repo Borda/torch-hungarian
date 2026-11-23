@@ -79,6 +79,11 @@ where = [
 [tool.setuptools.dynamic]
 version = { attr = "torch_linear_assignment.__version__" }
 
+[tool.pytest.ini_options]
+markers = [
+    "multi_device: needs two or more CUDA devices; the GPU test workflow runs these on a multi-GPU leg",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

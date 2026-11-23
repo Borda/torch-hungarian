@@ -1,8 +1,11 @@
 name: Modal GPU Tests (reusable)
 
 # Ported from https://github.com/Borda/affordable-GPU-CI
-# The callers live in dispatch_gpu-tests.yml and trigger-gpu-labels.yml. The `gpu-tests-report` job
-# comments the log on the pull request when the caller was one, and removes the trigger label.
+# The callers live in dispatch_gpu-tests.yml and trigger-gpu-labels.yml. One `gpu-tests-run` leg runs
+# per entry of `nb_devices`: the one-device leg runs the whole suite, and a leg with more devices
+# requests that many GPUs and runs only the tests marked `multi_device`, which skip on one GPU. The
+# `gpu-tests-report` job comments every leg's log on the pull request when the caller was one, and
+# removes the trigger label.
 
 on:
   workflow_call:
@@ -13,7 +16,7 @@ on:
         type: string
         default: ""
       gpu:
-        description: "Modal GPU request; compute capability 8.0+ only, so no T4. L4 also allows A10 and L40S"
+        description: "Modal GPU type without a device count; compute capability 8.0+ only, so no T4. L4 also allows A10 and L40S"
         required: false
         type: string
         default: "L4"
@@ -32,11 +35,11 @@ on:
         required: false
         type: string
         default: "-v"
-      min_devices:
-        description: "Eligible CUDA devices the run requires; 2 exercises the multi-device lane"
+      nb_devices:
+        description: "JSON list of device counts, one test leg each; a count above 1 asks Modal for that many GPUs, such as L4:2"
         required: false
-        type: number
-        default: 1
+        type: string
+        default: "[1, 2]"
     secrets:
       MODAL_TOKEN_ID:
         required: true
@@ -48,7 +51,13 @@ permissions:
 
 jobs:
   gpu-tests-run:
+    # The leg is part of the name, so the names stay unique and the report can read each leg's result.
+    name: gpu-tests-run (${{ matrix.nb_devices }} GPU)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nb_devices: ${{ fromJSON(inputs.nb_devices) }}
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
@@ -80,13 +89,14 @@ jobs:
         # fails with 404. Pinning the builder here keeps the image on Debian 12.
         MODAL_IMAGE_BUILDER_VERSION: "2025.06"
         MODAL_ENVIRONMENT: torch-hungarian
-        MODAL_GPU: ${{ inputs.gpu }}
+        MODAL_GPU: ${{ matrix.nb_devices > 1 && format('{0}:{1}', inputs.gpu, matrix.nb_devices) || inputs.gpu }}
         MODAL_PYTHON_VERSION: ${{ inputs.python_version }}
         # Passed through the environment rather than interpolated into the
         # command line, so workflow inputs cannot inject shell syntax.
         TEST_PATH: ${{ inputs.test_path }}
-        PYTEST_ARGS: ${{ inputs.pytest_args }}
-        MIN_DEVICES: ${{ inputs.min_devices }}
+        # Only the multi-device tests need the extra GPUs; the one-device leg already ran the rest.
+        PYTEST_ARGS: ${{ matrix.nb_devices > 1 && format('{0} -m multi_device', inputs.pytest_args) || inputs.pytest_args }}
+        MIN_DEVICES: ${{ matrix.nb_devices }}
       run: >-
         modal run .modal/test_runner.py
         --test-path "$TEST_PATH"
@@ -97,7 +107,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: gpu-pytest-output
+        name: gpu-pytest-output-${{ matrix.nb_devices }}gpu
         path: test-outputs/pytest-output.log
         if-no-files-found: warn
         retention-days: 30
@@ -107,6 +117,8 @@ jobs:
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
+      # `actions: read` lets the script read each leg's job result.
+      actions: read
       contents: read
       pull-requests: write
     steps:
@@ -118,57 +130,25 @@ jobs:
         sparse-checkout: .github/scripts
         persist-credentials: false
 
-    - name: Download the pytest log
-      id: download
+    # One artifact per leg; each lands in its own directory under test-outputs.
+    - name: Download the pytest logs
       continue-on-error: true
       uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
       with:
-        name: gpu-pytest-output
+        pattern: gpu-pytest-output-*
         path: test-outputs
 
     - name: Comment the result on the pull request
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
       env:
         GPU_JOB_RESULT: ${{ needs.gpu-tests-run.result }}
+        LEGS: ${{ inputs.nb_devices }}
         # The commit the tests ran on; the run can start well after the label.
         TESTED_SHA: ${{ steps.checkout.outputs.commit }}
       with:
         script: |
-          const fs = require('fs');
-          const { testedCommitLine } = require('./.github/scripts/tested-commit.js');
-          const path = 'test-outputs/pytest-output.log';
-          const jobResult = process.env.GPU_JOB_RESULT;
-
-          // A green check or a red cross up front, so the outcome is clear while scrolling the thread.
-          const icon = jobResult === 'success' ? '✅' : '❌';
-          let comment = `## ${icon} GPU test results\n\n**Job result:** ${icon} \`${jobResult}\`\n\n`;
-          comment += `${await testedCommitLine({ github, context, sha: process.env.TESTED_SHA })}\n\n`;
-
-          if (fs.existsSync(path)) {
-            // eslint-disable-next-line no-control-regex
-            const output = fs.readFileSync(path, 'utf8').replace(/\x1b\[[0-9;]*m/g, '');
-            const summary = output.split('\n').filter(line => line.includes('passed') || line.includes('failed')).pop();
-            if (summary) {
-              comment += `**Summary:** ${summary.trim()}\n\n`;
-            }
-            comment += '<details>\n<summary>Full test output</summary>\n\n```\n';
-            comment += output.substring(0, 60000);
-            if (output.length > 60000) {
-              comment += '\n... truncated, see the workflow artifact for the full log\n';
-            }
-            comment += '```\n</details>\n';
-          } else {
-            comment += 'No pytest log was produced. The GPU eligibility gate or the install step failed; see the workflow logs.\n';
-          }
-
-          comment += `\n[Workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
-
-          await github.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.payload.pull_request.number,
-            body: comment,
-          });
+          const { report } = require('./.github/scripts/gpu-test-report.js');
+          await report({ github, context, core });
 
     - name: Remove the trigger label
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
@@ -179,5 +159,5 @@ jobs:
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.payload.pull_request.number,
-            name: 'gpu-tests',
+            name: 'run-gpu-tests',
           });

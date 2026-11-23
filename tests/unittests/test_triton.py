@@ -361,6 +361,7 @@ def test_batch_linear_assignment_compiled_obeys_non_default_stream(
     assert torch.equal(actual.cpu(), expected)
 
 
+@pytest.mark.multi_device
 def test_batch_linear_assignment_compiled_isolates_two_cuda_devices() -> None:
     """Prevent stream, current-device, and workspace state from leaking across GPUs."""
     reason = compiled_triton_skip_reason()
@@ -408,6 +409,7 @@ def test_batch_linear_assignment_compiled_isolates_two_cuda_devices() -> None:
         assert torch.equal(result.cpu(), scipy_expected)
 
 
+@pytest.mark.multi_device
 def test_public_cuda_solve_runs_on_the_cost_device_without_a_device_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prevent a cost on a non-current GPU from launching on the current one."""
     reason = compiled_triton_skip_reason()

@@ -13,13 +13,13 @@ on:
         required: false
         default: ""
       gpu:
-        description: "Modal GPU request; compute capability 8.0+ only, so no T4. L4 also allows A10 and L40S"
+        description: "Modal GPU type without a device count; compute capability 8.0+ only, so no T4. L4 also allows A10 and L40S"
         required: false
         default: "L4"
-      min_devices:
-        description: "Eligible CUDA devices the run requires; 2 exercises the multi-device lane"
+      nb_devices:
+        description: "JSON list of device counts, one test leg each; [1] skips the two-GPU leg"
         required: false
-        default: "1"
+        default: "[1, 2]"
 
 permissions:
   contents: read
@@ -35,5 +35,5 @@ jobs:
     with:
       ref: ${{ inputs.ref || github.sha }}
       gpu: ${{ inputs.gpu || 'L4' }}
-      min_devices: ${{ fromJSON(inputs.min_devices || '1') }}
+      nb_devices: ${{ inputs.nb_devices || '[1, 2]' }}
     secrets: inherit
