@@ -1,6 +1,6 @@
 'use strict';
 
-// Builds the GPU benchmark report that `gpu-benchmarks.yml` writes to the run summary and,
+// Builds the GPU benchmark report that `_modal-dispatch_gpu-benchmarks.yml` writes to the run summary and,
 // for the `gpu-benchmarks` label, comments on the pull request. It lives here rather than
 // inline in the workflow so `gpu-benchmark-report.test.js` can run it without GitHub.
 
@@ -66,7 +66,8 @@ function describeLimitations(records) {
 function parsePresetResults(jobs) {
   const results = {};
   for (const job of jobs) {
-    const match = /^benchmark \((.+)\)$/.exec(job.name);
+    // A caller job prefixes the reusable workflow's job names, as in `gpu-benchmarks-label / gpu-benchmarks-run (wide)`.
+    const match = /\/ gpu-benchmarks-run \((.+)\)$/.exec(job.name);
     if (match) results[match[1]] = job.conclusion;
   }
   return results;

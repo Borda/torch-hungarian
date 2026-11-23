@@ -25,7 +25,12 @@ permissions:
   contents: read
 
 jobs:
-  gpu-tests:
+  gpu-tests-dispatch:
+    # The report job only comments on pull requests, but a caller must grant what a called job asks for.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/_modal-gpu-tests.yml
     with:
       ref: ${{ inputs.ref || github.sha }}

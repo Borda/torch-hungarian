@@ -74,11 +74,14 @@ test('describeLimitations clips long diagnostics and caps the list', () => {
   assert.ok(text.length < 20 * 450);
 });
 
-test('parsePresetResults reads the matrix job names and ignores other jobs', () => {
+test('parsePresetResults reads the benchmark matrix job names and ignores other jobs', () => {
   const jobs = [
-    { name: 'benchmark (rfdetr)', conclusion: 'success' },
-    { name: 'benchmark (wide)', conclusion: 'failure' },
-    { name: 'report', conclusion: null },
+    { name: 'gpu-benchmarks-label / gpu-benchmarks-resolve', conclusion: 'success' },
+    { name: 'gpu-benchmarks-label / gpu-benchmarks-run (rfdetr)', conclusion: 'success' },
+    { name: 'gpu-benchmarks-label / gpu-benchmarks-run (wide)', conclusion: 'failure' },
+    { name: 'gpu-benchmarks-label / gpu-benchmarks-report', conclusion: null },
+    { name: 'gpu-tests-label / gpu-tests-run', conclusion: 'success' },
+    { name: 'gpu-tests-label / gpu-tests-report', conclusion: null },
   ];
   assert.deepEqual(parsePresetResults(jobs), { rfdetr: 'success', wide: 'failure' });
 });
@@ -180,7 +183,7 @@ const env = { PRESETS: '["rfdetr"]', JOB_RESULT: 'success', GPU: 'L4' };
 
 test('report writes the summary and comments on a pull request', async () => {
   const dir = outputs({ 'benchmark-rfdetr.txt': 'table' });
-  const { calls, ...rest } = harness({ jobs: [{ name: 'benchmark (rfdetr)', conclusion: 'success' }] });
+  const { calls, ...rest } = harness({ jobs: [{ name: 'gpu-benchmarks-label / gpu-benchmarks-run (rfdetr)', conclusion: 'success' }] });
   await report({ ...rest, env, outputDir: dir });
   assert.equal(calls.summary.length, 1);
   assert.equal(calls.comments.length, 1);
