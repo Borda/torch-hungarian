@@ -104,12 +104,12 @@ RUN_TIMEOUT_SECONDS = 3600
 BENCHMARK_OUTPUT_DIR = Path("test-outputs")
 
 #: Benchmark presets the lane may run; each records validation-off solver time beside the public call.
-#: The ``readme`` preset is dispatch-only: the label lane runs ``rfdetr`` and ``wide`` and never it.
+#: GitHub Actions selects ``readme`` only by explicit dispatch. The label lane runs ``rfdetr`` and ``wide``.
 BENCHMARK_PRESETS = ("rfdetr", "wide", "readme")
 
 #: Arguments a preset always runs with, placed before the caller's tuning so the caller can still
-#: override them. ``readme`` repeats the README table's protocol: five fresh-process rounds, three
-#: warmup calls and thirty timed repetitions, the same as ``make benchmark-readme``.
+#: override them. ``readme`` measures the README workloads in five fresh-process rounds with
+#: three warmup calls and thirty timed repetitions, the same as ``make benchmark-readme``.
 _PRESET_DEFAULT_ARGS: dict[str, tuple[str, ...]] = {
     "readme": ("--process-rounds", "5", "--warmup", "3", "--repetitions", "30"),
 }
