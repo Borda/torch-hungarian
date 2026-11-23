@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   gpu-tests-label:
-    if: github.event.label.name == 'gpu-tests'
+    if: github.event.label.name == 'run-gpu-tests'
     # The report job comments on the pull request; a caller can only pass on permissions it holds itself.
     permissions:
       actions: read
@@ -35,7 +35,7 @@ jobs:
     secrets: inherit
 
   gpu-benchmarks-label:
-    if: github.event.label.name == 'gpu-benchmarks'
+    if: github.event.label.name == 'run-gpu-benchmarks'
     # The benchmark report job needs these; a caller can only pass on permissions it holds itself.
     permissions:
       actions: read
