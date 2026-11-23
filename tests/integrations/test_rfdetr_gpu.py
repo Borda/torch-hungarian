@@ -142,7 +142,8 @@ def test_multi_layer_match_on_cuda_matches_the_host_matcher(
     on_device = matcher._match_many(device_outputs, device_targets, RFDETR_GROUP_DETR)
 
     assert on_device is not None, "the CUDA matcher declined the folded multi-layer route"
-    assert batched_calls == [1] and kernel_calls
+    assert batched_calls == [1], "the folded route did not reach the batched assignment exactly once"
+    assert kernel_calls, "the folded route did not launch the Triton kernel"
     for outputs, layer_pairs in zip(host_outputs, on_device, strict=True):
         on_host = matcher(outputs, targets, group_detr=RFDETR_GROUP_DETR)
         cost = matcher._compute_compact_detection_cost_matrix(outputs, targets).float()

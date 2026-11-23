@@ -105,12 +105,14 @@ validate-gpu: test
 	$(PYTHON) -c "import torch; p = torch.cuda.get_device_properties(0); print(f'GPU: {p.name} sm_{p.major}{p.minor} | torch {torch.__version__} | cuda {torch.version.cuda}')"
 
 # This target is a fail-closed acceptance gate: a skipped test must not be
-# mistaken for evidence that the private compiled backend works on two GPUs.
+# mistaken for evidence that the private backend and public dispatch work across GPUs.
 validate-gpu-multi: install-dev
 	@set -e; \
 	$(PYTHON) -c "import importlib, importlib.metadata as m, importlib.util as u, platform, re, sys, torch; triton = m.version('triton') if u.find_spec('triton') else 'unavailable'; print('Python:', sys.version.replace(chr(10), ' ')); print(f'Platform: {platform.platform()}'); print(f'Torch: {torch.__version__}'); print(f'Torch CUDA: {torch.version.cuda}'); print(f'Triton: {triton}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); [print(f'GPU {index}: name={torch.cuda.get_device_properties(index).name} | compute_capability={torch.cuda.get_device_capability(index)[0]}.{torch.cuda.get_device_capability(index)[1]} | total_memory_bytes={torch.cuda.get_device_properties(index).total_memory} | multiprocessors={torch.cuda.get_device_properties(index).multi_processor_count}') for index in range(torch.cuda.device_count())]; version = re.match(r'(\\d+)\\.(\\d+)', torch.__version__); eligible = [index for index in range(torch.cuda.device_count()) if torch.cuda.get_device_capability(index) >= (8, 0)]; valid = sys.platform == 'linux' and torch.cuda.is_available() and torch.version.cuda is not None and version is not None and tuple(map(int, version.groups())) >= (2, 4) and u.find_spec('triton') is not None and len(eligible) >= 2; sys.exit(0 if valid else 'validate-gpu-multi requires Linux, CUDA-enabled PyTorch 2.4+, Triton, and at least two visible GPUs with compute capability >= 8.0')"; \
 	if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi; else echo "nvidia-smi: unavailable"; fi; \
-	$(PYTHON) -m pytest -v tests/unittests/test_triton.py::test_batch_linear_assignment_compiled_isolates_two_cuda_devices
+	$(PYTHON) -m pytest -v \
+		tests/unittests/test_triton.py::test_batch_linear_assignment_compiled_isolates_two_cuda_devices \
+		tests/unittests/test_triton.py::test_public_cuda_solve_runs_on_the_cost_device_without_a_device_context
 
 validate: export CUDA_LAUNCH_BLOCKING := 1
 validate: validate-cpu validate-gpu

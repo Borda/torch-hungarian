@@ -2,7 +2,8 @@
 
 These tests deliberately call the private wrapper rather than the public API:
 on an unsupported platform the public API falls back to SciPy, which is useful
-behavior but is not evidence that a Triton kernel compiled or executed.
+behavior but is not evidence that a Triton kernel compiled or executed. The one exception is the
+device-selection test, which needs the public dispatch and asserts that the compiled solve ran.
 """
 
 import importlib
@@ -12,6 +13,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 
 from tests._triton_eligibility import compiled_device_params, compiled_triton_skip_reason
+from torch_linear_assignment import batch_linear_assignment
 
 
 @pytest.fixture(params=compiled_device_params())
@@ -400,3 +402,65 @@ def test_batch_linear_assignment_compiled_isolates_two_cuda_devices() -> None:
         assert result.device == device
         assert result.dtype == torch.long
         assert torch.equal(result.cpu(), scipy_expected)
+
+
+def test_public_cuda_solve_runs_on_the_cost_device_without_a_device_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent a cost on a non-current GPU from launching on the current one."""
+    reason = compiled_triton_skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    devices = [
+        torch.device(f"cuda:{device_index}")
+        for device_index in range(torch.cuda.device_count())
+        if torch.cuda.get_device_capability(device_index) >= (8, 0)
+    ]
+    if len(devices) < 2:
+        pytest.skip("compiled multi-device acceptance requires two CUDA devices with capability >= 8.0")
+
+    backend = importlib.import_module("torch_linear_assignment._triton")
+    launched_on: list[int] = []
+    original_solve = backend._solve
+
+    def recording_solve(cost: torch.Tensor, *args: object, **kwargs: object) -> object:
+        launched_on.append(torch.cuda.current_device())
+        return original_solve(cost, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_solve", recording_solve)
+    host_cost = torch.rand((4, 5, 5), generator=torch.Generator().manual_seed(51))
+
+    # The other GPU is current, and the call opens no device context of its own.
+    with torch.cuda.device(devices[0]):
+        actual = batch_linear_assignment(host_cost.to(devices[1]))
+
+    assert launched_on == [devices[1].index]
+    assert actual.device == devices[1]
+    assert torch.equal(actual.cpu(), _scipy_assignment(host_cost))
+
+
+def test_batch_linear_assignment_compiled_offsets_stay_exact_past_two_to_the_31_elements(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Prevent 32-bit per-batch offsets from wrapping once a batch holds more than 2**31 elements."""
+    backend, device = triton_backend_device
+    size = 64
+    batch_size = 2**31 // (size * size) + 1024
+    cost_bytes = batch_size * size * size * 4
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    if free_bytes < cost_bytes * 5 // 4 + 2**30:
+        pytest.skip(f"the oversized batch needs about {cost_bytes * 5 // 4 / 2**30:.0f} GiB of free GPU memory")
+
+    generator = torch.Generator(device=device).manual_seed(7)
+    cost = torch.rand((batch_size, size, size), generator=generator, device=device)
+    assert cost.numel() > 2**31
+
+    # The private backend launches on the current device, which the fixture does not set.
+    with torch.cuda.device(device):
+        actual = backend.batch_linear_assignment(cost, validation="off")
+
+        # Compare each end of the batch with a small solve that cannot overflow its offsets.
+        window = 2048
+        for batch_slice in (slice(0, window), slice(batch_size - window, batch_size)):
+            expected = backend.batch_linear_assignment(cost[batch_slice].contiguous(), validation="off")
+            assert torch.equal(actual[batch_slice], expected)
+    assert torch.equal(actual[-4:].cpu(), _scipy_assignment(cost[-4:]))

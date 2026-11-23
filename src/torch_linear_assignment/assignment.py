@@ -81,7 +81,12 @@ def batch_linear_assignment_cuda(cost: torch.Tensor) -> torch.Tensor:
     backend = _load_triton_backend()
     if backend is None:
         raise RuntimeError("Triton is unavailable for CUDA linear assignment.")
-    return backend.batch_linear_assignment(cost)
+    # The Triton launch goes to the current device, so a cost on another GPU needs its own device
+    # made current. The guard is skipped for the common case, where it already is.
+    if cost.device.index == torch.cuda.current_device():
+        return backend.batch_linear_assignment(cost)
+    with torch.cuda.device(cost.device):
+        return backend.batch_linear_assignment(cost)
 
 
 def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
@@ -110,9 +115,12 @@ def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
     if cost.is_cuda and _cuda_uses_triton(cost):
         return batch_linear_assignment_cuda(cost)
 
+    # SciPy works on host memory, so any other device, such as MPS or XPU, is solved on the host
+    # and the assignment is returned on the input's device.
     device = cost.device
     if cost.is_cuda:
         _warn_cuda_fallback()
+    if device.type != "cpu":
         cost = cost.cpu()
     return batch_linear_assignment_cpu(cost).to(device)
 

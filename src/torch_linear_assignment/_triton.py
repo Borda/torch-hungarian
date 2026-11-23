@@ -64,7 +64,8 @@ def _linear_assignment_kernel(
     IS_FP64: tl.constexpr,
 ):
     """Solve one rectangular assignment problem in a single Triton program."""
-    batch_index = tl.program_id(0)
+    # int64, so the per-batch offsets below stay exact once a batch holds more than 2**31 elements.
+    batch_index = tl.program_id(0).to(tl.int64)
     lane = tl.arange(0, BLOCK_N)
     column_mask = lane < NUM_COLUMNS
     row_mask = lane < NUM_ROWS
