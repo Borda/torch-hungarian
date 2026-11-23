@@ -1444,6 +1444,15 @@ def _skip_run(
         raise SystemExit(1)
 
 
+def _progress_options(total: int, *, interactive: bool) -> dict[str, Any]:
+    """Return the progress bar options: a live bar in a terminal, one line per 5% in a log."""
+    options: dict[str, Any] = {"desc": "Benchmark cases", "unit": "case"}
+    if not interactive:
+        # A log cannot redraw a bar, so every refresh would be a new line, one per case.
+        options.update(miniters=max(1, total // 20), mininterval=0)
+    return options
+
+
 def main() -> None:
     """Run the configured matrix and emit structured evidence or skip rows."""
     arguments = _arguments()
@@ -1470,7 +1479,7 @@ def main() -> None:
 
     cases = _case_matrix(arguments)
     for process_round, backend, validation, batch, workers, tasks, dtype_name in tqdm(
-        cases, desc="Benchmark cases", unit="case"
+        cases, **_progress_options(len(cases), interactive=sys.stderr.isatty())
     ):
         specification = {
             "run_id": run_id,

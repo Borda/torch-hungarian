@@ -1639,6 +1639,31 @@ def test_main_exits_nonzero_after_parity_failure(
     assert f"JSONL results: {output.resolve()}" in stdout
 
 
+@pytest.mark.parametrize(
+    ("total", "interactive", "expected"),
+    [
+        pytest.param(324, True, {"desc": "Benchmark cases", "unit": "case"}, id="terminal-redraws-every-case"),
+        pytest.param(
+            324,
+            False,
+            {"desc": "Benchmark cases", "unit": "case", "miniters": 16, "mininterval": 0},
+            id="log-prints-every-five-percent",
+        ),
+        pytest.param(
+            7,
+            False,
+            {"desc": "Benchmark cases", "unit": "case", "miniters": 1, "mininterval": 0},
+            id="log-with-few-cases-prints-each",
+        ),
+    ],
+)
+def test_progress_options_limit_log_output_to_every_five_percent(
+    total: int, interactive: bool, expected: dict[str, object]
+) -> None:
+    """Prevent a non-interactive log from getting one progress line per benchmark case."""
+    assert benchmark._progress_options(total, interactive=interactive) == expected
+
+
 def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1676,6 +1701,7 @@ def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(
         return materialized
 
     monkeypatch.setattr(benchmark, "tqdm", track_progress)
+    monkeypatch.setattr(benchmark.sys.stderr, "isatty", lambda: True)
     monkeypatch.setattr(benchmark, "_arguments", lambda: arguments)
     _visible_gpu(monkeypatch, (8, 9), "NVIDIA L4")
     worker_specifications: list[dict[str, object]] = []
