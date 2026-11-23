@@ -79,7 +79,7 @@ _SEPARATOR = "=" * 80
 _CHECKOUT_IMPORT_CHECK = (
     "from pathlib import Path; import rfdetr.models.matcher, rfdetr.models._assignment; "
     "import torch_linear_assignment as package; "
-    f"origin = Path(package.__file__).resolve(); checkout = Path({REMOTE_PROJECT_DIR!r}); "
+    f"origin = Path(package.__file__).resolve(); checkout = Path({REMOTE_PROJECT_DIR!r}).resolve(); "
     "expected = checkout / 'src/torch_linear_assignment/__init__.py'; "
     "assert origin == expected, f'torch_linear_assignment is not imported from the checkout: {origin}'; "
     "print(f'torch_linear_assignment imported from {origin}')"

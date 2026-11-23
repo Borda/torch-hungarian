@@ -3,6 +3,7 @@ import subprocess
 import sys
 import textwrap
 import warnings
+from types import SimpleNamespace
 from unittest import TestCase
 
 import pytest
@@ -334,6 +335,103 @@ def test_batch_linear_assignment_cuda_integer_parity_is_reproducible(shape, seed
         f"batches={mismatched_batches}, expected={expected.tolist()}, actual={actual.tolist()}, "
         f"expected_objective={expected_objective.tolist()}, actual_objective={actual_objective.tolist()}"
     )
+
+
+class _DeviceProxy(torch.Tensor):
+    """A host tensor that reports another device, so device handling runs without that hardware."""
+
+    reported_device: torch.device
+
+    @property
+    def device(self) -> torch.device:
+        """Report the device the tensor stands in for."""
+        return self.reported_device
+
+    def cpu(self, *args, **kwargs) -> torch.Tensor:
+        """Return the plain host tensor, as a copy off a real accelerator would."""
+        return self.as_subclass(torch.Tensor)
+
+
+def _device_proxy(cost: torch.Tensor, device: str) -> _DeviceProxy:
+    """Wrap a host cost so it reports ``device``."""
+    proxy = cost.as_subclass(_DeviceProxy)
+    proxy.reported_device = torch.device(device)
+    return proxy
+
+
+def test_batch_linear_assignment_solves_other_accelerators_on_host(monkeypatch):
+    """Prevent an MPS, XPU or other non-CUDA input from reaching the host solver off its device."""
+    host_cost = torch.tensor([[[4.0, 1.0, 3.0], [2.0, 0.0, 5.0], [3.0, 2.0, 2.0]]])
+    solved_on = []
+
+    def host_solver(cost):
+        solved_on.append(cost.device)
+        return scipy_assignment(cost)
+
+    monkeypatch.setattr(assignment_module, "batch_linear_assignment_cpu", host_solver)
+
+    result = batch_linear_assignment(_device_proxy(host_cost, "meta"))
+
+    assert solved_on == [torch.device("cpu")]
+    assert result.device.type == "meta"
+    assert result.dtype == torch.long
+    assert result.shape == (1, 3)
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is not available")
+@pytest.mark.parametrize("shape", [(2, 4, 4), (1, 6, 3), (1, 3, 6)], ids=["square", "tall", "wide"])
+def test_batch_linear_assignment_solves_mps_costs_on_host(shape):
+    """Return SciPy's assignment on the MPS device for square, tall and wide costs."""
+    cost = torch.rand(shape, generator=torch.Generator().manual_seed(11))
+
+    result = batch_linear_assignment(cost.to("mps"))
+
+    assert result.device.type == "mps"
+    assert torch.equal(result.cpu(), scipy_assignment(cost))
+
+
+@pytest.mark.parametrize(
+    ("current_index", "cost_index", "entered"),
+    [
+        pytest.param(0, 1, [1], id="other-device"),
+        pytest.param(1, 1, [], id="current-device"),
+    ],
+)
+def test_batch_linear_assignment_cuda_launches_on_the_cost_device(monkeypatch, current_index, cost_index, entered):
+    """Prevent a cost on a non-current GPU from launching on the current one, without a guard on the common path."""
+    state = {"current": current_index}
+    entered_indices = []
+    launched_on = []
+
+    class FakeDeviceContext:
+        """Stand in for ``torch.cuda.device`` by moving a fake current-device index."""
+
+        def __init__(self, device):
+            self.index = torch.device(device).index
+
+        def __enter__(self):
+            entered_indices.append(self.index)
+            self.previous, state["current"] = state["current"], self.index
+
+        def __exit__(self, *exc_info):
+            state["current"] = self.previous
+
+    def launch(cost):
+        launched_on.append(state["current"])
+        return "assignment"
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: state["current"])
+    monkeypatch.setattr(torch.cuda, "device", FakeDeviceContext)
+    monkeypatch.setattr(
+        assignment_module, "_load_triton_backend", lambda: SimpleNamespace(batch_linear_assignment=launch)
+    )
+
+    cost = _device_proxy(torch.zeros(1, 2, 2), f"cuda:{cost_index}")
+
+    assert assignment_module.batch_linear_assignment_cuda(cost) == "assignment"
+    assert launched_on == [cost_index]
+    assert entered_indices == entered
+    assert state["current"] == current_index
 
 
 class TestAssignment(TestCase):

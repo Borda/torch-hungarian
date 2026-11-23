@@ -17,6 +17,13 @@
 - Mark the pull request comments from the Modal runs with a green check or a red cross: the title and job result of the `gpu-tests` and `gpu-benchmarks` comments, and each benchmark preset heading, which takes its outcome from that preset's own matrix job. The benchmark report job gains `actions: read` for this, and its comment is bounded below GitHub's size limit, with the label removed even when posting fails. The report moves out of the workflow into `.github/scripts/gpu-benchmark-report.js`, which `.github/scripts/gpu-benchmark-report.test.js` covers with Node's built-in test runner in a new `workflow-scripts` job of the CPU workflow.
 - Name both the lane and the implementation in the benchmark table's backend column when they differ, so the public call reads `public_cuda/triton` and no longer prints the same label as the private `triton` lane.
 
+### Fixed
+
+- Solve a cost on any device other than the CPU or CUDA, such as MPS or XPU, on the host and return the assignment on the input's device. The CPU path used to call `numpy()` on the accelerator tensor and raise `TypeError`.
+- Launch the Triton solve on the cost's own GPU when it is not the current one. The launch used to go to the current device, so a cost on `cuda:1` with `cuda:0` current could fail or run on the wrong GPU; the common case, where the device is already current, opens no device context.
+- Compute the per-batch offsets in the Triton kernel in 64 bits. Batches of more than 2\*\*31 elements wrapped the 32-bit offsets and read and wrote the wrong addresses.
+- Say which of its two conditions failed when the multi-layer RF-DETR GPU test asserts, and resolve the checkout path in the Modal import check the same way as the imported package path.
+
 ## 0.1.0 - 2026-11-21
 
 ### Added
