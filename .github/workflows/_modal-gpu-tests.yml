@@ -64,47 +64,41 @@ jobs:
         sparse-checkout: tests
         persist-credentials: false
 
+    # The `python` shell below runs this step's script as a Python file; set Python up so the
+    # command is on the path whatever the runner image ships.
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+
     - name: Resolve device counts
       id: devices
       env:
         REQUESTED_DEVICES: ${{ inputs.nb_devices }}
       run: |
-        python3 - <<'PYTHON'
         import json
         import os
         import subprocess
 
         requested = os.environ["REQUESTED_DEVICES"]
-        if requested:
-            try:
-                legs = json.loads(requested)
-            except json.JSONDecodeError as error:
-                raise SystemExit(f"nb_devices must be a JSON list: {error.msg}") from error
-            if (
-                not isinstance(legs, list)
-                or not legs
-                or any(type(count) is not int or count < 1 for count in legs)
-                or len(set(legs)) != len(legs)
-            ):
-                raise SystemExit("nb_devices must contain distinct positive integers")
+        # Older workload revisions have the original tests but no multi_device marker. Inspect the
+        # tracked suite without importing code from the requested revision.
+        grep = subprocess.run(
+            ["git", "grep", "-q", "-E", r"^[[:space:]]*@pytest\.mark\.multi_device", "HEAD", "--", "tests/"],
+            check=False,
+        )
+        assert grep.returncode in (0, 1), "could not inspect the workload revision for multi_device tests"
+        has_multi_device = grep.returncode == 0
 
-        if not requested or any(count > 1 for count in legs):
-            # Older workload revisions contain the original tests but have no multi_device selector.
-            # Inspect the tracked suite without importing code from the requested revision.
-            marker = subprocess.run(
-                ["git", "grep", "-q", "-E", r"^[[:space:]]*@pytest\.mark\.multi_device([[:space:](]|$)", "HEAD", "--", "tests/"],
-                check=False,
-            )
-            if marker.returncode not in (0, 1):
-                raise SystemExit("could not inspect the workload revision for multi_device tests")
-            if requested and marker.returncode == 1:
-                raise SystemExit("this workload revision has no multi_device tests; use nb_devices=[1]")
-            if not requested:
-                legs = [1, 2] if marker.returncode == 0 else [1]
+        legs = json.loads(requested) if requested else [1, 2] if has_multi_device else [1]
+        assert isinstance(legs, list) and legs, "nb_devices must be a non-empty JSON list"
+        assert all(type(n) is int and n > 0 for n in legs), "nb_devices must hold positive integers"
+        assert len(set(legs)) == len(legs), "nb_devices must hold distinct counts"
+        assert has_multi_device or max(legs) == 1, "this workload revision has no multi_device tests; use nb_devices=[1]"
 
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             print(f"legs={json.dumps(legs)}", file=output)
-        PYTHON
+      shell: python
 
   gpu-tests-run:
     needs: gpu-tests-resolve
