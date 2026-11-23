@@ -64,7 +64,7 @@ _PRESETS: dict[str, tuple[tuple[int, int, int], ...]] = {
     # 4 and 16 images x 13 query groups, and 16 images x 13 groups x 3 decoder layers.
     "rfdetr": tuple((batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)),
     # Wide, square, and many-small-problem shapes, where kernel-side changes cost the most.
-    "wide": ((208, 300, 600), (208, 512, 512), (832, 300, 60)),
+    "wide": ((208, 300, 300), (208, 300, 600), (208, 512, 512), (832, 300, 60)),
 }
 
 #: Lowest NVIDIA compute capability the package runs Triton on; below it the public call uses SciPy.

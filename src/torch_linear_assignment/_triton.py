@@ -11,11 +11,11 @@ Scope:
     correctness-first: outer augmenting-path steps remain sequential while each
     current set of candidate columns is processed as a masked lane vector.
     Per-search state remains program-local. Runtime matrix dimensions allow shapes
-    in a column bucket to share a compiled variant for a fixed target, dtype and
-    pointer alignment. Each program uses row offsets only when every finite
-    subtraction is safe. The correctness launch currently
-    keeps its loop-carried vectors within one warp; wider launch configurations
-    remain gated on exact GPU parity. Its ordering reproduces the legacy CUDA
+    in a column bucket to share a compiled variant for a fixed target, dtype,
+    pointer alignment and warp count. Each program uses row offsets only when every finite
+    subtraction is safe. Barriers order the workspace reads and writes between
+    warps, so large shapes launch with several warps while small shapes, including
+    the RF-DETR matcher's, keep one. Its ordering reproduces the legacy CUDA
     and SciPy rectangular-LSAP algorithm.
 
 Usage:
@@ -213,9 +213,11 @@ def _linear_assignment_kernel(
         tl.store(u + current_row, current_potential + min_value, mask=solved)
         visited_rows = scanned_rows
         update_row = solved & row_mask & visited_rows & (lane != current_row)
+        # Load only the rows that are updated. Otherwise a vector load of `current_row` could race
+        # with the scalar store above, which is not synchronized with loads in other warps.
         tl.store(
             u + lane,
-            tl.load(u + lane, mask=row_mask, other=0.0) + min_value - scanned_row_costs,
+            tl.load(u + lane, mask=update_row, other=0.0) + min_value - scanned_row_costs,
             mask=update_row,
         )
 
@@ -238,11 +240,15 @@ def _linear_assignment_kernel(
             )
             safe_row = tl.where(augmenting, augmenting_row, 0)
             previous_column = tl.load(col4row + safe_row)
+            # Every warp must read `col4row` before any warp overwrites it below.
+            tl.debug_barrier()
             tl.store(row4col + safe_column, augmenting_row, mask=augmenting)
             tl.store(col4row + safe_row, augmenting_column, mask=augmenting)
             augmenting = augmenting & (augmenting_row != current_row)
             augmenting_column = tl.where(augmenting, previous_column, augmenting_column)
             augmentation_steps += 1
+            # The next step reads the assignments this step wrote, from other warps.
+            tl.debug_barrier()
 
         # The next row consumes the assignments and potentials written above.
         tl.debug_barrier()
@@ -301,10 +307,31 @@ def _sections(buffer: torch.Tensor, counts: tuple[int, ...]) -> list[torch.Tenso
     return sections
 
 
-def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor, torch.Tensor]:
-    """Launch the one-program-per-batch kernel and return both assignment views."""
+# Use more lanes for wide, tall-enough solver shapes. RF-DETR's small solver row
+# counts keep its launches on one warp.
+_MULTI_WARP_COUNT = 4
+_MULTI_WARP_MIN_BLOCK = 512
+_MULTI_WARP_MIN_ROWS = 128
+
+
+def _warp_count(rows: int, block_n: int) -> int:
+    """Pick the warp count for a solver shape: several warps only for wide, tall-enough problems."""
+    if block_n >= _MULTI_WARP_MIN_BLOCK and rows >= _MULTI_WARP_MIN_ROWS:
+        return _MULTI_WARP_COUNT
+    return 1
+
+
+def _solve(
+    cost: torch.Tensor, validation: ValidationMode, num_warps: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Launch the one-program-per-batch kernel and return both assignment views.
+
+    The forced-warp tests use ``num_warps`` to override the shape heuristic.
+    """
     batch_size, rows, columns = cost.shape
     block_n = triton.next_power_of_2(columns)
+    if num_warps is None:
+        num_warps = _warp_count(rows, block_n)
     # Two allocations instead of five: one float block (potentials and row minima) and one int32
     # block (assignments and the infeasibility flags), sliced into the kernel's workspaces.
     float_counts = (batch_size * rows, batch_size * columns, batch_size * rows)
@@ -327,9 +354,7 @@ def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor
         NUM_COLUMNS=columns,
         BLOCK_N=block_n,
         IS_FP64=cost.dtype == torch.float64,
-        # Multi-warp loop-carried state produces false infeasibility on the
-        # saved 512-lane L4 case; keep one warp until a wider design is exact.
-        num_warps=1,
+        num_warps=num_warps,
     )
     if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.any().item()):
         raise ValueError("cost matrix is infeasible")

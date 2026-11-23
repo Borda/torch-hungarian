@@ -1,9 +1,8 @@
 """Compiled-GPU acceptance tests for the private Triton assignment backend.
 
-These tests deliberately call the private wrapper rather than the public API:
-on an unsupported platform the public API falls back to SciPy, which is useful
-behavior but is not evidence that a Triton kernel compiled or executed. The one exception is the
-device-selection test, which needs the public dispatch and asserts that the compiled solve ran.
+Most tests call the private wrapper to exercise the compiled backend directly. Tests that
+exercise public CUDA dispatch use the eligible-device fixture or assert that the compiled
+solve ran, since the public API can fall back to SciPy.
 """
 
 import importlib
@@ -558,21 +557,32 @@ def test_batch_linear_assignment_compiled_matches_scipy_on_tied_costs_at_matcher
 
 
 @pytest.mark.parametrize(
-    "shapes",
+    ("shapes", "expected_binaries"),
     [
         pytest.param(
-            [(3, 300, 1), (5, 300, 2), (7, 300, 5), (11, 300, 9), (13, 300, 17), (17, 300, 30)], id="one-bucket"
+            [(3, 300, 1), (5, 300, 2), (7, 300, 5), (11, 300, 9), (13, 300, 17), (17, 300, 30)],
+            1,
+            id="one-bucket",
         ),
         pytest.param(
             [(3, 40, 20), (5, 100, 50), (7, 200, 150), (9, 300, 300), (11, 60, 20), (13, 500, 400), (15, 129, 40)],
+            4,
             id="mixed-buckets",
+        ),
+        pytest.param(
+            [(3, 127, 300), (5, 300, 126), (7, 128, 300), (9, 300, 129)],
+            2,
+            id="same-bucket-different-warp-counts",
         ),
     ],
 )
-def test_batch_linear_assignment_compiled_builds_one_binary_per_column_bucket(
-    triton_backend_device: tuple[object, torch.device], tmp_path: Path, shapes: list[tuple[int, int, int]]
+def test_batch_linear_assignment_compiled_reuses_binaries_within_bucket_and_warp_count(
+    triton_backend_device: tuple[object, torch.device],
+    tmp_path: Path,
+    shapes: list[tuple[int, int, int]],
+    expected_binaries: int,
 ) -> None:
-    """Prevent a new compile per target count, or per batch size through unaligned workspace pointers."""
+    """Reuse cubins across runtime dimensions when the column bucket and warp count match."""
     backend, device = triton_backend_device
     backend_path = Path(backend.__file__).resolve()
     program = (
@@ -598,9 +608,130 @@ def test_batch_linear_assignment_compiled_builds_one_binary_per_column_bucket(
         timeout=900,
     )
 
-    # Hold target, dtype and input alignment fixed while varying the runtime dimensions.
-    buckets = {1 << (max(workers, tasks) - 1).bit_length() for _, workers, tasks in shapes}
-    assert len(list(tmp_path.rglob("*.cubin"))) == len(buckets)
+    assert len(list(tmp_path.rglob("*.cubin"))) == expected_binaries
+
+
+@pytest.mark.parametrize(
+    ("rows", "block_n", "expected"),
+    [
+        pytest.param(30, 512, 1, id="matcher-shape-few-rows"),
+        pytest.param(300, 32, 1, id="matcher-shape-narrow"),
+        pytest.param(300, 256, 1, id="below-block-threshold"),
+        pytest.param(127, 512, 1, id="below-row-threshold"),
+        pytest.param(128, 512, 4, id="at-both-thresholds"),
+        pytest.param(300, 1024, 4, id="large-square-like"),
+    ],
+)
+def test_warp_count_uses_several_warps_only_for_large_shapes(
+    triton_backend_device: tuple[object, torch.device], rows: int, block_n: int, expected: int
+) -> None:
+    """Keep small and RF-DETR shapes on one warp, and use several only past both thresholds."""
+    backend, _ = triton_backend_device
+
+    assert backend._warp_count(rows, block_n) == expected
+
+
+# (batch, rows, columns, tied). Small shapes carry the item count; the large ones are where
+# several warps pay off, and the 30x300 batch is the RF-DETR matcher shape after transposing.
+_WARP_SWEEP_CASES = {
+    "tiny-continuous": (25000, 8, 12, False),
+    "small-tied": (25000, 24, 40, True),
+    "square-continuous": (25000, 30, 30, False),
+    "wide-tied": (25000, 16, 64, True),
+    "matcher-continuous": (2000, 30, 300, False),
+    "large-square": (200, 300, 300, False),
+    "largest-square": (100, 512, 512, False),
+    "large-wide-tied": (200, 300, 600, True),
+}
+
+
+@pytest.mark.parametrize("num_warps", [1, 2, 4, 8])
+def test_batch_linear_assignment_compiled_is_exact_at_every_warp_count(
+    triton_backend_device: tuple[object, torch.device], num_warps: int
+) -> None:
+    """Match both SciPy assignment views for over 100k problems at each warp count."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(1000 + num_warps)
+    problems = 0
+
+    for case_id, (batch_size, rows, columns, tied) in _WARP_SWEEP_CASES.items():
+        shape = (batch_size, rows, columns)
+        cost = (
+            torch.randint(0, 3, shape, generator=generator).float() if tied else torch.rand(shape, generator=generator)
+        )
+
+        with torch.cuda.device(device):
+            col4row, row4col = backend._solve(cost.to(device), "off", num_warps=num_warps)
+        expected = _scipy_assignment(cost)
+        # Scatter only indices from SciPy. A bad kernel index remains a host assertion failure.
+        inverse = torch.full((batch_size, columns), -1, dtype=torch.long)
+        inverse.scatter_(1, expected, torch.arange(rows).expand(batch_size, rows))
+        assert torch.equal(col4row.cpu().long(), expected), f"{case_id}: row assignment at {num_warps} warps"
+        assert torch.equal(row4col.cpu().long(), inverse), f"{case_id}: column assignment at {num_warps} warps"
+        problems += batch_size
+
+    assert problems >= 100_000
+
+
+@pytest.mark.parametrize("num_warps", [1, 2, 4, 8])
+def test_batch_linear_assignment_compiled_preserves_float64_at_each_warp_count(
+    triton_backend_device: tuple[object, torch.device], num_warps: int
+) -> None:
+    """Keep a sub-float32 assignment difference in the large float64 kernel."""
+    backend, device = triton_backend_device
+    cost = torch.full((1, 128, 257), torch.inf, dtype=torch.float64)
+    cost[0].fill_diagonal_(0.0)
+    cost[0, :2, :2] = torch.tensor([[1.0 + 1e-8, 1.0], [1.0, 1.0 + 1e-8]], dtype=torch.float64)
+    expected = _scipy_assignment(cost)
+    assert torch.equal(expected[0, :2], torch.tensor([1, 0]))
+    assert not torch.equal(expected, _scipy_assignment(cost.float()))
+
+    with torch.cuda.device(device):
+        col4row, _ = backend._solve(cost.to(device), "full", num_warps=num_warps)
+
+    assert torch.equal(col4row.cpu().long(), expected)
+
+
+def _long_augmenting_path_cost() -> torch.Tensor:
+    """Build a four-warp cost whose last solver row must displace every previous assignment."""
+    cost = torch.full((128, 257), torch.inf)
+    rows = torch.arange(127)
+    cost[rows, 2 * rows] = 0.0
+    cost[rows, 2 * (rows + 1)] = 1.0
+    cost[-1, 0] = 0.0
+    return cost
+
+
+def test_batch_linear_assignment_compiled_matches_both_public_views_after_long_tall_augmentation(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Compare both public tall results after a four-warp path through forbidden edges."""
+    _, device = triton_backend_device
+    cost = _long_augmenting_path_cost().T.repeat(2, 1, 1)
+    expected_assignment = _scipy_assignment(cost)
+    expected_rows, expected_cols = _scipy_indices(cost)
+
+    with torch.cuda.device(device):
+        cuda_cost = cost.to(device)
+        assignment = batch_linear_assignment(cuda_cost)
+        rows, cols = batch_linear_assignment_indices(cuda_cost)
+
+    assert torch.equal(assignment.cpu(), expected_assignment)
+    assert torch.equal(rows.cpu(), expected_rows)
+    assert torch.equal(cols.cpu(), expected_cols)
+
+
+def test_batch_linear_assignment_compiled_rejects_large_infeasible_augmenting_path(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Raise on a four-warp search with no free column and a finite edge in every solver row."""
+    _, device = triton_backend_device
+    cost = _long_augmenting_path_cost()
+    cost[-2, 254] = torch.inf
+    tall_cost = cost.T.repeat(2, 1, 1).to(device)
+
+    with torch.cuda.device(device), pytest.raises(ValueError, match="cost matrix is infeasible"):
+        batch_linear_assignment(tall_cost)
 
 
 def _scipy_indices(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

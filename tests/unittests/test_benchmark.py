@@ -555,8 +555,10 @@ def test_default_validation_modes_satisfy_the_validation_overhead_gate(monkeypat
 @pytest.mark.parametrize(
     ("preset", "expected"),
     [
-        ("rfdetr", [(batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)]),
-        ("wide", [(208, 300, 600), (208, 512, 512), (832, 300, 60)]),
+        pytest.param(
+            "rfdetr", [(batch, 300, tasks) for batch in (52, 208, 624) for tasks in (1, 2, 5, 10, 20, 30)], id="rfdetr"
+        ),
+        pytest.param("wide", [(208, 300, 300), (208, 300, 600), (208, 512, 512), (832, 300, 60)], id="wide"),
     ],
 )
 def test_preset_runs_its_explicit_shapes_with_per_shape_worker_counts(
