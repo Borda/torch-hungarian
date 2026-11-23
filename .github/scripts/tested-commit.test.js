@@ -87,7 +87,9 @@ test('testedCommitLine falls back to the commit when the head cannot be read', a
   assert.equal(await testedCommitLine({ github, context, sha: TESTED }), commitLine({ sha: TESTED, repoUrl: REPO_URL }));
 });
 
-test('testedCommitLine keeps the head but drops the count when the comparison fails', async () => {
-  const { github, context } = harness({ compareError: new Error('not found') });
-  assert.match(await testedCommitLine({ github, context, sha: TESTED }), /the pull request head is now/);
+test('testedCommitLine gives only the commit when the comparison fails, never a divergence claim', async () => {
+  const { github, context } = harness({ compareError: new Error('unavailable') });
+  const line = await testedCommitLine({ github, context, sha: TESTED });
+  assert.equal(line, commitLine({ sha: TESTED, repoUrl: REPO_URL }));
+  assert.doesNotMatch(line, /descendant/);
 });

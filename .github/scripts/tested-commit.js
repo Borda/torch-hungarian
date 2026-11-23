@@ -34,20 +34,18 @@ async function testedCommitLine({ github, context, sha }) {
   if (!pullRequest || !sha) return commitLine({ sha, repoUrl });
 
   const { owner, repo } = context.repo;
-  let headSha;
-  let commitsBehind;
   try {
     const { data } = await github.rest.pulls.get({ owner, repo, pull_number: pullRequest.number });
-    headSha = data.head.sha;
-    if (headSha !== sha) {
-      const comparison = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${sha}...${headSha}` });
-      if (comparison.data.status === 'ahead') commitsBehind = comparison.data.ahead_by;
-    }
+    const headSha = data.head.sha;
+    if (headSha === sha) return commitLine({ sha, repoUrl, headSha });
+    const comparison = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${sha}...${headSha}` });
+    // Only a comparison that answered can say the head is not a descendant.
+    const commitsBehind = comparison.data.status === 'ahead' ? comparison.data.ahead_by : undefined;
+    return commitLine({ sha, repoUrl, headSha, commitsBehind });
   } catch (error) {
     // The commit alone still answers what ran; the distance is a convenience.
-    if (!headSha) return commitLine({ sha, repoUrl });
+    return commitLine({ sha, repoUrl });
   }
-  return commitLine({ sha, repoUrl, headSha, commitsBehind });
 }
 
 module.exports = { commitLine, testedCommitLine };
