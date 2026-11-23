@@ -454,11 +454,13 @@ def test_batch_linear_assignment_compiled_offsets_stay_exact_past_two_to_the_31_
     cost = torch.rand((batch_size, size, size), generator=generator, device=device)
     assert cost.numel() > 2**31
 
-    actual = backend.batch_linear_assignment(cost, validation="off")
+    # The private backend launches on the current device, which the fixture does not set.
+    with torch.cuda.device(device):
+        actual = backend.batch_linear_assignment(cost, validation="off")
 
-    # Random costs have one optimum, so each end of the batch must equal a small solve of its own.
-    window = 2048
-    for batch_slice in (slice(0, window), slice(batch_size - window, batch_size)):
-        expected = backend.batch_linear_assignment(cost[batch_slice].contiguous(), validation="off")
-        assert torch.equal(actual[batch_slice], expected)
+        # Compare each end of the batch with a small solve that cannot overflow its offsets.
+        window = 2048
+        for batch_slice in (slice(0, window), slice(batch_size - window, batch_size)):
+            expected = backend.batch_linear_assignment(cost[batch_slice].contiguous(), validation="off")
+            assert torch.equal(actual[batch_slice], expected)
     assert torch.equal(actual[-4:].cpu(), _scipy_assignment(cost[-4:]))
