@@ -9,7 +9,7 @@ Every test in `tests/unittests/test_triton.py` and `tests/integrations/test_rfde
 - an available CUDA device on a CUDA-enabled PyTorch build,
 - PyTorch 2.4 or newer,
 - the `triton` package,
-- at least `--min-devices` devices with compute capability 8.0 or newer.
+- at least `--min-devices` devices with compute capability 8.0 or newer. CI sets it to the leg's device count.
 
 T4 (`sm_75`) therefore fails the gate rather than passing with a fully skipped suite. Use L4, A10, L40S, A100, or H100.
 
@@ -32,15 +32,17 @@ The container installs the project with the pinned `develop` and `rfdetr` depend
 
 ## CI use
 
-| Workflow                                        | Trigger                                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `.github/workflows/_modal-gpu-tests.yml`        | reusable; called by the two test workflows below                                                           |
-| `.github/workflows/_modal-gpu-benchmarks.yml`   | reusable; runs the presets and reports them, called by the two workflows below                             |
-| `.github/workflows/dispatch_gpu-tests.yml`      | push to `main` and `develop`, plus manual dispatch with a GPU and device count                             |
-| `.github/workflows/trigger-gpu-labels.yml`      | the `gpu-tests` label runs the tests and the `gpu-benchmarks` label runs the benchmarks, on a pull request |
-| `.github/workflows/dispatch_gpu-benchmarks.yml` | manual dispatch with a GPU, preset and arguments                                                           |
+| Workflow                                        | Trigger                                                                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `.github/workflows/_modal-gpu-tests.yml`        | reusable; called by the two test workflows below                                                                   |
+| `.github/workflows/_modal-gpu-benchmarks.yml`   | reusable; runs the presets and reports them, called by the two workflows below                                     |
+| `.github/workflows/dispatch_gpu-tests.yml`      | push to `main` and `develop`, plus manual dispatch with a GPU type and a list of device counts                     |
+| `.github/workflows/trigger-gpu-labels.yml`      | the `run-gpu-tests` label runs the tests and the `run-gpu-benchmarks` label runs the benchmarks, on a pull request |
+| `.github/workflows/dispatch_gpu-benchmarks.yml` | manual dispatch with a GPU, preset and arguments                                                                   |
 
-Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lanes also need the `gpu-tests` and `gpu-benchmarks` labels to exist; each is removed again once its run reports back.
+Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lanes also need the `run-gpu-tests` and `run-gpu-benchmarks` labels to exist; each is removed again once its run reports back.
+
+The test workflow runs one leg per device count. Leave `nb_devices` blank to run the whole suite on one GPU and the two marked isolation tests on two GPUs. Revisions that predate the `multi_device` marker default to one GPU. An explicit list must contain distinct positive integers, and counts above one require the marker at the selected revision. Set `nb_devices` to `[1]` to run only the full suite. The default two-GPU request is `L4:2`, with `A10:2` and `L40S:2` as fallbacks. A custom accelerator uses that type with the selected device count.
 
 The benchmark lane runs every preset in parallel, or the one chosen on dispatch, and fails when any case misses exact parity, any case is incomplete, or the public call did not execute the Triton backend. It reports the results table, one row of medians across process rounds per case, and, as limitations, every record that was not measured to the run summary and, for the label, as a pull request comment; the JSONL records are uploaded as `gpu-benchmark-<preset>` artifacts. Every Triton shape runs all four validation modes, because the run fails closed without a complete validation-overhead measurement. The default three process rounds run each case in three fresh processes, and every Triton case pays a cold compile in each; pass `--process-rounds 1` on dispatch for a quicker look.
 
