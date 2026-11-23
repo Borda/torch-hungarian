@@ -11,8 +11,8 @@ Scope:
     correctness-first: outer augmenting-path steps remain sequential while each
     current set of candidate columns is processed as a masked lane vector.
     Per-search state remains program-local. Runtime matrix dimensions allow shapes
-    in a column bucket to share a compiled variant for a fixed target, dtype and
-    pointer alignment. Each program uses row offsets only when every finite
+    in a column bucket to share a compiled variant for a fixed target, dtype,
+    pointer alignment and warp count. Each program uses row offsets only when every finite
     subtraction is safe. Barriers order the workspace reads and writes between
     warps, so large shapes launch with several warps while small shapes, including
     the RF-DETR matcher's, keep one. Its ordering reproduces the legacy CUDA
@@ -305,8 +305,8 @@ def _sections(buffer: torch.Tensor, counts: tuple[int, ...]) -> list[torch.Tenso
     return sections
 
 
-# Large shapes gain 1.7-3.0x from several warps. Smaller ones, RF-DETR's among them, gain nothing
-# measurable, so they keep the single warp the kernel was first validated with.
+# Use more lanes for wide, tall-enough solver shapes. RF-DETR's small solver row
+# counts keep its launches on one warp.
 _MULTI_WARP_COUNT = 4
 _MULTI_WARP_MIN_BLOCK = 512
 _MULTI_WARP_MIN_ROWS = 128
@@ -324,7 +324,7 @@ def _solve(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch the one-program-per-batch kernel and return both assignment views.
 
-    ``num_warps`` overrides the shape heuristic; only the parity sweep passes it.
+    The forced-warp tests use ``num_warps`` to override the shape heuristic.
     """
     batch_size, rows, columns = cost.shape
     block_n = triton.next_power_of_2(columns)
