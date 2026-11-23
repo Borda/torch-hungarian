@@ -18,7 +18,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 
 from tests._triton_eligibility import compiled_device_params, compiled_triton_skip_reason
-from torch_linear_assignment import batch_linear_assignment
+from torch_linear_assignment import batch_linear_assignment, batch_linear_assignment_indices
 
 
 @pytest.fixture(params=compiled_device_params())
@@ -432,7 +432,8 @@ def test_public_cuda_solve_runs_on_the_cost_device_without_a_device_context(monk
         return original_solve(cost, *args, **kwargs)
 
     monkeypatch.setattr(backend, "_solve", recording_solve)
-    host_cost = torch.rand((4, 5, 5), generator=torch.Generator().manual_seed(51))
+    # Eight problems stay on the GPU; up to four this small are routed to SciPy.
+    host_cost = torch.rand((8, 5, 5), generator=torch.Generator().manual_seed(51))
 
     # The other GPU is current, and the call opens no device context of its own.
     with torch.cuda.device(devices[0]):
@@ -600,3 +601,183 @@ def test_batch_linear_assignment_compiled_builds_one_binary_per_column_bucket(
     # Hold target, dtype and input alignment fixed while varying the runtime dimensions.
     buckets = {1 << (max(workers, tasks) - 1).bit_length() for _, workers, tasks in shapes}
     assert len(list(tmp_path.rglob("*.cubin"))) == len(buckets)
+
+
+def _scipy_indices(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return SciPy's row-sorted ``(row_ind, col_ind)`` stacked over the batch, after the solver's promotion."""
+    solver_dtype = torch.float64 if cost.dtype == torch.float64 else torch.float32
+    pairs = [linear_sum_assignment(matrix.numpy()) for matrix in cost.detach().to(device="cpu", dtype=solver_dtype)]
+    rows = torch.stack([torch.from_numpy(row_ind) for row_ind, _ in pairs]).long()
+    cols = torch.stack([torch.from_numpy(col_ind) for _, col_ind in pairs]).long()
+    return rows, cols
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((5, 40, 40), id="square"),
+        pytest.param((5, 300, 7), id="tall"),
+        pytest.param((5, 7, 300), id="wide"),
+        pytest.param((6, 300, 30), id="matcher-shape"),
+        pytest.param((5, 1, 9), id="one-worker"),
+        pytest.param((5, 9, 1), id="one-task"),
+    ],
+)
+@pytest.mark.parametrize("validation", ["full", "off"])
+def test_batch_linear_assignment_indices_compiled_match_scipy_pairs(
+    triton_backend_device: tuple[object, torch.device], shape: tuple[int, int, int], validation: str
+) -> None:
+    """Return SciPy's row-sorted pairs of static shape (B, min(W, T)) in either validation mode."""
+    backend, device = triton_backend_device
+    cost = torch.rand(shape, generator=torch.Generator().manual_seed(sum(shape)))
+
+    with torch.cuda.device(device):
+        rows, cols = backend.batch_linear_assignment_indices(cost.to(device), validation=validation)
+
+    expected_rows, expected_cols = _scipy_indices(cost)
+    assert rows.device == cols.device == device
+    assert rows.dtype == cols.dtype == torch.long
+    assert rows.shape == cols.shape == (shape[0], min(shape[1:]))
+    assert torch.equal(rows.cpu(), expected_rows)
+    assert torch.equal(cols.cpu(), expected_cols)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float64, torch.int32])
+def test_batch_linear_assignment_indices_compiled_match_scipy_for_promoted_dtypes(
+    triton_backend_device: tuple[object, torch.device], dtype: torch.dtype
+) -> None:
+    """Promote the solver dtype exactly as the assignment does, so both views agree with SciPy."""
+    backend, device = triton_backend_device
+    raw = torch.rand((6, 50, 20), generator=torch.Generator().manual_seed(9)) * 40
+    cost = raw.floor().to(dtype) if dtype == torch.int32 else raw.to(dtype)
+
+    with torch.cuda.device(device):
+        rows, cols = backend.batch_linear_assignment_indices(cost.to(device))
+
+    expected_rows, expected_cols = _scipy_indices(cost)
+    assert torch.equal(rows.cpu(), expected_rows)
+    assert torch.equal(cols.cpu(), expected_cols)
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [
+        pytest.param((0, 4, 3), (0, 3), id="no-batch"),
+        pytest.param((2, 0, 3), (2, 0), id="no-workers"),
+        pytest.param((2, 4, 0), (2, 0), id="no-tasks"),
+    ],
+)
+def test_batch_linear_assignment_indices_compiled_keep_the_static_shape_for_empty_costs(
+    triton_backend_device: tuple[object, torch.device], shape: tuple[int, int, int], expected: tuple[int, int]
+) -> None:
+    """Return empty long pairs of shape (B, min(W, T)) without launching a kernel."""
+    backend, device = triton_backend_device
+
+    rows, cols = backend.batch_linear_assignment_indices(torch.zeros(shape, device=device))
+
+    assert rows.shape == cols.shape == expected
+    assert rows.dtype == cols.dtype == torch.long
+    assert rows.device == cols.device == device
+
+
+@pytest.mark.parametrize(
+    ("cost", "error", "message"),
+    [
+        pytest.param(torch.tensor([[[0.0, float("nan")]]]), ValueError, "invalid numeric entries", id="nan"),
+        pytest.param(
+            torch.tensor([[[0.0, float("-inf")]]]), ValueError, "invalid numeric entries", id="negative-infinity"
+        ),
+        pytest.param(torch.full((1, 2, 2), float("inf")), ValueError, "infeasible", id="infeasible"),
+        pytest.param(torch.zeros(1, 2, 2, dtype=torch.complex64), TypeError, "Complex costs", id="complex"),
+    ],
+)
+def test_batch_linear_assignment_indices_compiled_raise_the_assignment_errors(
+    triton_backend_device: tuple[object, torch.device], cost: torch.Tensor, error: type[Exception], message: str
+) -> None:
+    """Reject, under full validation, the costs the assignment rejects, with the same exception types."""
+    backend, device = triton_backend_device
+
+    with pytest.raises(error, match=message), torch.cuda.device(device):
+        backend.batch_linear_assignment_indices(cost.to(device))
+
+
+def test_batch_linear_assignment_indices_compiled_disable_cuda_autocast(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Prevent ambient AMP from changing the pairs the solver returns."""
+    backend, device = triton_backend_device
+    cost = torch.rand((5, 12, 6), generator=torch.Generator().manual_seed(3))
+
+    with torch.cuda.device(device), torch.amp.autocast("cuda", dtype=torch.float16):
+        rows, cols = backend.batch_linear_assignment_indices(cost.to(device))
+
+    expected_rows, expected_cols = _scipy_indices(cost)
+    assert torch.equal(rows.cpu(), expected_rows)
+    assert torch.equal(cols.cpu(), expected_cols)
+
+
+def test_public_indices_replay_in_a_cuda_graph_with_validation_off(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Capture the unchecked solve once after warm-up and replay it on new costs with exact pairs."""
+    _, device = triton_backend_device
+    shape = (13, 300, 7)
+    generator = torch.Generator().manual_seed(21)
+    with torch.cuda.device(device):
+        static_cost = torch.rand(shape, generator=generator).to(device)
+        # Compilation and workspace allocation happen on a side stream before capture.
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            batch_linear_assignment_indices(static_cost, validate="off")
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            rows, cols = batch_linear_assignment_indices(static_cost, validate="off")
+
+        for _ in range(3):
+            fresh = torch.rand(shape, generator=generator)
+            static_cost.copy_(fresh)
+            graph.replay()
+            expected_rows, expected_cols = _scipy_indices(fresh)
+            assert torch.equal(rows.cpu(), expected_rows)
+            assert torch.equal(cols.cpu(), expected_cols)
+
+
+@pytest.mark.parametrize(
+    ("shape", "launches"),
+    [
+        pytest.param((1, 300, 300), 0, id="single-problem-goes-to-scipy"),
+        pytest.param((4, 30, 30), 0, id="four-small-problems-go-to-scipy"),
+        pytest.param((5, 30, 30), 1, id="five-small-problems-launch-the-kernel"),
+        pytest.param((13, 300, 7), 1, id="matcher-shape-launches-the-kernel"),
+    ],
+)
+def test_public_calls_route_small_batches_to_scipy(
+    triton_backend_device: tuple[object, torch.device],
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, int, int],
+    launches: int,
+) -> None:
+    """Launch the kernel only for batches the routing rule leaves on the GPU, with SciPy's answer either way."""
+    backend, device = triton_backend_device
+    launched: list[tuple[int, ...]] = []
+    original_solve = backend._solve
+
+    def recording_solve(cost: torch.Tensor, *args: object, **kwargs: object) -> object:
+        launched.append(tuple(cost.shape))
+        return original_solve(cost, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_solve", recording_solve)
+    host_cost = torch.rand(shape, generator=torch.Generator().manual_seed(sum(shape)))
+
+    cost = host_cost.to(device)
+    with torch.cuda.device(device):
+        assignment = batch_linear_assignment(cost)
+        rows, cols = batch_linear_assignment_indices(cost)
+
+    assert len(launched) == 2 * launches
+    assert torch.equal(assignment.cpu(), _scipy_assignment(host_cost))
+    expected_rows, expected_cols = _scipy_indices(host_cost)
+    assert torch.equal(rows.cpu(), expected_rows)
+    assert torch.equal(cols.cpu(), expected_cols)
