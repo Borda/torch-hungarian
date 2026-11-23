@@ -603,6 +603,67 @@ def test_batch_linear_assignment_compiled_builds_one_binary_per_column_bucket(
     assert len(list(tmp_path.rglob("*.cubin"))) == len(buckets)
 
 
+@pytest.mark.parametrize(
+    ("rows", "block_n", "expected"),
+    [
+        pytest.param(30, 512, 1, id="matcher-shape-few-rows"),
+        pytest.param(300, 32, 1, id="matcher-shape-narrow"),
+        pytest.param(300, 256, 1, id="below-block-threshold"),
+        pytest.param(127, 512, 1, id="below-row-threshold"),
+        pytest.param(128, 512, 4, id="at-both-thresholds"),
+        pytest.param(300, 1024, 4, id="large-square-like"),
+    ],
+)
+def test_warp_count_uses_several_warps_only_for_large_shapes(
+    triton_backend_device: tuple[object, torch.device], rows: int, block_n: int, expected: int
+) -> None:
+    """Keep small and RF-DETR shapes on one warp, and use several only past both thresholds."""
+    backend, _ = triton_backend_device
+
+    assert backend._warp_count(rows, block_n) == expected
+
+
+# (batch, rows, columns, tied). Small shapes carry the item count; the large ones are where
+# several warps pay off, and the 30x300 batch is the RF-DETR matcher shape after transposing.
+_WARP_SWEEP_CASES = {
+    "tiny-continuous": (25000, 8, 12, False),
+    "small-tied": (25000, 24, 40, True),
+    "square-continuous": (25000, 30, 30, False),
+    "wide-tied": (25000, 16, 64, True),
+    "matcher-continuous": (2000, 30, 300, False),
+    "large-square": (200, 300, 300, False),
+    "largest-square": (100, 512, 512, False),
+    "large-wide-tied": (200, 300, 600, True),
+}
+
+
+@pytest.mark.parametrize("num_warps", [1, 2, 4, 8])
+def test_batch_linear_assignment_compiled_is_exact_at_every_warp_count(
+    triton_backend_device: tuple[object, torch.device], num_warps: int
+) -> None:
+    """Return SciPy's assignment for over 100k problems at each warp count, so barriers leave no race."""
+    backend, device = triton_backend_device
+    generator = torch.Generator().manual_seed(1000 + num_warps)
+    problems = 0
+
+    for case_id, (batch_size, rows, columns, tied) in _WARP_SWEEP_CASES.items():
+        shape = (batch_size, rows, columns)
+        cost = (
+            torch.randint(0, 3, shape, generator=generator).float() if tied else torch.rand(shape, generator=generator)
+        )
+
+        with torch.cuda.device(device):
+            col4row, _ = backend._solve(cost.to(device), "off", num_warps=num_warps)
+        # Check the range on the host first, so a wrong index fails here instead of as a device assert.
+        actual = col4row.cpu().long()
+
+        assert int(actual.min()) >= 0 and int(actual.max()) < columns, f"{case_id}: index out of range"
+        assert torch.equal(actual, _scipy_assignment(cost)), f"{case_id}: {num_warps} warps"
+        problems += batch_size
+
+    assert problems >= 100_000
+
+
 def _scipy_indices(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Return SciPy's row-sorted ``(row_ind, col_ind)`` stacked over the batch, after the solver's promotion."""
     solver_dtype = torch.float64 if cost.dtype == torch.float64 else torch.float32
