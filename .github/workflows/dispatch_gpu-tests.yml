@@ -17,9 +17,9 @@ on:
         required: false
         default: "L4"
       nb_devices:
-        description: "JSON list of device counts, one test leg each; [1] skips the two-GPU leg"
+        description: "Optional JSON list of distinct positive device counts; blank selects the default for the tested revision"
         required: false
-        default: "[1, 2]"
+        default: ""
 
 permissions:
   contents: read
@@ -35,5 +35,5 @@ jobs:
     with:
       ref: ${{ inputs.ref || github.sha }}
       gpu: ${{ inputs.gpu || 'L4' }}
-      nb_devices: ${{ inputs.nb_devices || '[1, 2]' }}
+      nb_devices: ${{ inputs.nb_devices || '' }}
     secrets: inherit

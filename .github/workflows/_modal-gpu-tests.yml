@@ -36,10 +36,10 @@ on:
         type: string
         default: "-v"
       nb_devices:
-        description: "JSON list of device counts, one test leg each; a count above 1 asks Modal for that many GPUs, such as L4:2"
+        description: "JSON list of distinct positive device counts; defaults to [1, 2] when the selected revision has multi-device tests, otherwise [1]"
         required: false
         type: string
-        default: "[1, 2]"
+        default: ""
     secrets:
       MODAL_TOKEN_ID:
         required: true
@@ -50,18 +50,75 @@ permissions:
   contents: read
 
 jobs:
+  gpu-tests-resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.checkout.outputs.commit }}
+      legs: ${{ steps.devices.outputs.legs }}
+    steps:
+    # Resolve a moving branch once so both the matrix and the report refer to the same workload revision.
+    - id: checkout
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        ref: ${{ inputs.ref || github.sha }}
+        sparse-checkout: tests
+        persist-credentials: false
+
+    - name: Resolve device counts
+      id: devices
+      env:
+        REQUESTED_DEVICES: ${{ inputs.nb_devices }}
+      run: |
+        python3 - <<'PYTHON'
+        import json
+        import os
+        import subprocess
+
+        requested = os.environ["REQUESTED_DEVICES"]
+        if requested:
+            try:
+                legs = json.loads(requested)
+            except json.JSONDecodeError as error:
+                raise SystemExit(f"nb_devices must be a JSON list: {error.msg}") from error
+            if (
+                not isinstance(legs, list)
+                or not legs
+                or any(type(count) is not int or count < 1 for count in legs)
+                or len(set(legs)) != len(legs)
+            ):
+                raise SystemExit("nb_devices must contain distinct positive integers")
+
+        if not requested or any(count > 1 for count in legs):
+            # Older workload revisions contain the original tests but have no multi_device selector.
+            # Inspect the tracked suite without importing code from the requested revision.
+            marker = subprocess.run(
+                ["git", "grep", "-q", "-E", r"^[[:space:]]*@pytest\.mark\.multi_device([[:space:](]|$)", "HEAD", "--", "tests/"],
+                check=False,
+            )
+            if marker.returncode not in (0, 1):
+                raise SystemExit("could not inspect the workload revision for multi_device tests")
+            if requested and marker.returncode == 1:
+                raise SystemExit("this workload revision has no multi_device tests; use nb_devices=[1]")
+            if not requested:
+                legs = [1, 2] if marker.returncode == 0 else [1]
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            print(f"legs={json.dumps(legs)}", file=output)
+        PYTHON
+
   gpu-tests-run:
+    needs: gpu-tests-resolve
     # The leg is part of the name, so the names stay unique and the report can read each leg's result.
     name: gpu-tests-run (${{ matrix.nb_devices }} GPU)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        nb_devices: ${{ fromJSON(inputs.nb_devices) }}
+        nb_devices: ${{ fromJSON(needs.gpu-tests-resolve.outputs.legs) }}
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
-        ref: ${{ inputs.ref }}
+        ref: ${{ needs.gpu-tests-resolve.outputs.sha }}
         persist-credentials: false
 
     - name: Set up Python
@@ -113,8 +170,8 @@ jobs:
         retention-days: 30
 
   gpu-tests-report:
-    needs: gpu-tests-run
-    if: always() && github.event_name == 'pull_request'
+    needs: [gpu-tests-resolve, gpu-tests-run]
+    if: always() && github.event_name == 'pull_request' && needs.gpu-tests-resolve.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       # `actions: read` lets the script read each leg's job result.
@@ -122,11 +179,10 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-    # Only the comment helper is needed. It comes from the commit the tests ran on.
-    - id: checkout
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+    # Load the reporter from the workflow revision, which can be newer than the workload.
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
-        ref: ${{ github.event.pull_request.head.sha }}
+        ref: ${{ github.workflow_sha }}
         sparse-checkout: .github/scripts
         persist-credentials: false
 
@@ -142,9 +198,9 @@ jobs:
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
       env:
         GPU_JOB_RESULT: ${{ needs.gpu-tests-run.result }}
-        LEGS: ${{ inputs.nb_devices }}
+        LEGS: ${{ needs.gpu-tests-resolve.outputs.legs }}
         # The commit the tests ran on; the run can start well after the label.
-        TESTED_SHA: ${{ steps.checkout.outputs.commit }}
+        TESTED_SHA: ${{ needs.gpu-tests-resolve.outputs.sha }}
       with:
         script: |
           const { report } = require('./.github/scripts/gpu-test-report.js');

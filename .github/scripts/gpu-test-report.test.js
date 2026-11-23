@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const { buildReport, legTitle, logPath, parseLegResults, report, summaryLine, COMMENT_HARD_LIMIT } = require('./gpu-test-report.js');
+const { buildReport, legTitle, parseLegResults, report, summaryLine, COMMENT_HARD_LIMIT } = require('./gpu-test-report.js');
 
 const GITHUB_COMMENT_LIMIT = 65536;
 
@@ -17,7 +17,7 @@ function logs(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpu-test-report-'));
   for (const [devices, content] of Object.entries(files)) {
     if (content === null) continue;
-    const file = logPath(dir, Number(devices));
+    const file = path.join(dir, 'gpu-pytest-output-' + devices + 'gpu', 'pytest-output.log');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, content);
   }
@@ -71,14 +71,16 @@ test('buildReport puts the tested commit line under the job result, and nothing 
   assert.doesNotMatch(build({ outputDir }), /Tested commit/);
 });
 
-test('buildReport falls back to the overall result for a leg without a job result', () => {
-  const body = build({ outputDir: logs({}) });
-  assert.equal(body.match(/### ✅/g).length, 2);
+test('buildReport keeps a missing leg result unknown while preserving known outcomes', () => {
+  const body = build({ jobResult: 'failure', legResults: { 2: 'failure' }, outputDir: logs({ 1: '== 1 passed ==\n' }) });
+  assert.match(body, /\*\*Job result:\*\* ❌/);
+  assert.match(body, /### ❔ 1 GPU — result unavailable[^]*== 1 passed ==/);
+  assert.match(body, /### ❌ 2 GPUs/);
 });
 
-test('buildReport says so when a leg produced no log and still shows the other leg', () => {
-  const body = build({ jobResult: 'failure', legResults: { 1: 'success', 2: 'failure' }, outputDir: logs({ 1: '== 1 passed ==\n', 2: null }) });
-  assert.match(body, /### ❌ 2 GPUs\n\nNo pytest log was produced/);
+test('buildReport describes a missing artifact without attributing a failure', () => {
+  const body = build({ legResults: { 1: 'success', 2: 'success' }, outputDir: logs({ 1: '== 1 passed ==\n', 2: null }) });
+  assert.match(body, /### ✅ 2 GPUs\n\nPytest log unavailable/);
   assert.match(body, /### ✅ 1 GPU[^]*== 1 passed ==/);
 });
 
@@ -146,10 +148,17 @@ test('report comments each leg on the pull request', async () => {
   assert.match(calls.comments[0].body, /actions\/runs\/42\)$/);
 });
 
-test('report warns and carries on when job results or the comment are unavailable', async () => {
-  const { calls, ...rest } = harness({ postFails: true });
-  await report({ ...rest, env, outputDir: logs({ 1: '== 1 passed ==\n' }) });
-  assert.equal(calls.warnings.length, 2);
+test('report keeps individual results unknown when the jobs request fails', async () => {
+  const { calls, ...rest } = harness();
+  await report({ ...rest, env: { ...env, GPU_JOB_RESULT: 'failure' }, outputDir: logs({ 1: '== 1 passed ==\n' }) });
+  assert.equal(calls.warnings.length, 1);
   assert.match(calls.warnings[0], /per-leg job results/);
-  assert.match(calls.warnings[1], /pull request comment/);
+  assert.match(calls.comments[0].body, /### ❔ 1 GPU — result unavailable/);
+  assert.match(calls.comments[0].body, /### ❔ 2 GPUs — result unavailable/);
+});
+
+test('report rejects when GitHub refuses the comment so the workflow can retain the label', async () => {
+  const { calls, ...rest } = harness({ jobs: [], postFails: true });
+  await assert.rejects(report({ ...rest, env, outputDir: logs({}) }), /rejected/);
+  assert.equal(calls.comments.length, 0);
 });

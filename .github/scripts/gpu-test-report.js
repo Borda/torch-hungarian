@@ -54,11 +54,13 @@ function summaryLine(output) {
 
 /** One leg's heading and summary, and its log text when the leg produced one. */
 function buildSection({ devices, result, outputDir }) {
-  let body = `### ${icon(result)} ${legTitle(devices)}\n\n`;
+  const title = legTitle(devices);
+  const heading = result ? `${icon(result)} ${title}` : `❔ ${title} — result unavailable`;
+  let body = `### ${heading}\n\n`;
   const log = readLog(logPath(outputDir, devices));
   if (log === null) {
     return {
-      body: `${body}No pytest log was produced. The GPU eligibility gate or the install step failed; see the workflow logs.\n\n`,
+      body: `${body}Pytest log unavailable. See the workflow run for details.\n\n`,
       log: null,
     };
   }
@@ -71,13 +73,13 @@ function buildSection({ devices, result, outputDir }) {
  * Build the comment text for the legs of one run.
  *
  * The logs share what is left of the budget after the headings and wrappers, so no mix of long
- * logs can push the comment over GitHub's limit. A leg without a job result takes the overall one.
+ * logs can push the comment over GitHub's limit. Individual headings use only per-leg conclusions.
  */
 function buildReport({ legs, jobResult, legResults = {}, outputDir, runUrl, commitLine = '' }) {
   const commit = commitLine ? `${commitLine}\n\n` : '';
   const head = `## ${icon(jobResult)} GPU test results\n\n**Job result:** ${icon(jobResult)} \`${jobResult}\`\n\n${commit}`;
   const link = `[Workflow run](${runUrl})`;
-  const sections = legs.map(devices => buildSection({ devices, result: legResults[devices] ?? jobResult, outputDir }));
+  const sections = legs.map(devices => buildSection({ devices, result: legResults[devices], outputDir }));
 
   const withLogs = sections.filter(section => section.log !== null);
   const fixed = head.length + link.length + sections.reduce((sum, section) => sum + section.body.length, 0);
@@ -130,22 +132,18 @@ async function report({ github, context, core, env = process.env, outputDir = 't
     runUrl: `${context.payload.repository.html_url}/actions/runs/${context.runId}`,
   });
 
-  try {
-    await github.rest.issues.createComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      issue_number: context.payload.pull_request.number,
-      body,
-    });
-  } catch (error) {
-    core.warning(`Could not post the pull request comment: ${error.message}`);
-  }
+  // Let a rejected write fail the workflow step so label removal waits for delivery.
+  await github.rest.issues.createComment({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    issue_number: context.payload.pull_request.number,
+    body,
+  });
 }
 
 module.exports = {
   buildReport,
   legTitle,
-  logPath,
   parseLegResults,
   report,
   summaryLine,
