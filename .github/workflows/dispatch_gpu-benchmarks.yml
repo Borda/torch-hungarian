@@ -1,7 +1,7 @@
 name: Modal GPU Benchmarks
 
 # Manual trigger for the benchmark presets. The runs, the results table and the run summary live in
-# _modal-gpu-benchmarks.yml, which trigger-gpu-labels.yml also calls for the `gpu-benchmarks` label.
+# _modal-gpu-benchmarks.yml, which trigger-gpu-labels.yml also calls for the `run-gpu-benchmarks` label.
 # A run costs real money and needs the Modal credentials, so it never runs on push.
 
 on:

@@ -2,7 +2,7 @@ name: Modal GPU Benchmarks (reusable)
 
 # Runs the benchmark presets on a Modal GPU and reports the results table: to the run summary, and,
 # when the caller was a pull request, also as a pull request comment. The callers are
-# dispatch_gpu-benchmarks.yml (manual dispatch) and trigger-gpu-labels.yml (the `gpu-benchmarks` label). A run
+# dispatch_gpu-benchmarks.yml (manual dispatch) and trigger-gpu-labels.yml (the `run-gpu-benchmarks` label). A run
 # costs real money and needs the Modal credentials, so it never runs on push. The label trigger is
 # deliberately `pull_request` and never `pull_request_target`: GitHub withholds secrets from fork
 # pull requests, so untrusted code cannot reach the Modal credentials even if the label is applied
@@ -161,5 +161,5 @@ jobs:
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.payload.pull_request.number,
-            name: 'gpu-benchmarks',
+            name: 'run-gpu-benchmarks',
           });

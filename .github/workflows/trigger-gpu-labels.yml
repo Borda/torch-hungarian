@@ -8,7 +8,7 @@ name: Modal GPU (label-triggered)
 #
 # One label event starts one run, which the run name labels with the label. GitHub cannot filter
 # the trigger by label name and a job cannot pick its reusable workflow from an expression, so each
-# lane job carries an `if:` on the label: `gpu-tests` calls the test workflow and `gpu-benchmarks`
+# lane job carries an `if:` on the label: `run-gpu-tests` calls the test workflow and `run-gpu-benchmarks`
 # the benchmark workflow, and each reports on its own. The lane job the label did not select is
 # skipped, and any other label skips both. Job names are unique across the workflows.
 
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   gpu-tests-label:
-    if: github.event.label.name == 'gpu-tests'
+    if: github.event.label.name == 'run-gpu-tests'
     # The report job comments on the pull request; a caller can only pass on permissions it holds itself.
     permissions:
       actions: read
@@ -35,7 +35,7 @@ jobs:
     secrets: inherit
 
   gpu-benchmarks-label:
-    if: github.event.label.name == 'gpu-benchmarks'
+    if: github.event.label.name == 'run-gpu-benchmarks'
     # The benchmark report job needs these; a caller can only pass on permissions it holds itself.
     permissions:
       actions: read
