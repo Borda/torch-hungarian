@@ -26,10 +26,15 @@ the RF-DETR integration tests run on this lane instead of skipping. Benchmark pr
 their JSONL records to ``test-outputs/benchmark-<preset>.jsonl``.
 
 Environment Variables:
-    MODAL_GPU: GPU request passed to Modal, such as ``L4``, ``A100``, or
-        ``L4:2`` for two devices. Compute capability 8.0 or newer is required,
-        so ``T4`` (``sm_75``) is rejected by the gate rather than silently
-        skipped.
+    MODAL_GPU: GPU request passed to Modal, such as ``L4`` (the default),
+        ``A100``, or ``L4:2`` for two devices. Compute capability 8.0 or newer
+        is required, so ``T4`` (``sm_75``) is rejected by the gate rather than
+        silently skipped.
+    MODAL_GPU_FALLBACKS: Comma-separated types Modal may use instead when the
+        test lane asks for ``L4``; defaults to ``A10,L40S`` then and to none
+        for any other ``MODAL_GPU``. An empty value turns them off. The
+        benchmark lane never uses fallbacks, because timings are only
+        comparable on one type.
     MODAL_PYTHON_VERSION: Python version of the container image.
 """
 
@@ -46,8 +51,36 @@ import modal
 #: Modal application name; stable so runs group together in the Modal dashboard.
 APP_NAME = "torch-hungarian-gpu-tests"
 
-#: GPU request forwarded to Modal. ``L4`` is the cheapest ``sm_89`` device.
-GPU_TYPE = os.environ.get("MODAL_GPU", "L4")
+
+def _gpu_request(primary: str, fallbacks: str = "") -> str | list[str]:
+    """Build Modal's ``gpu`` argument from a primary request and optional fallback types.
+
+    A comma-separated ``primary`` is already a list. A device count on the first type, as in
+    ``L4:2``, is copied to each fallback so a fallback never offers fewer devices.
+    """
+    types = [item.strip() for item in primary.split(",") if item.strip()]
+    if not types:
+        raise ValueError(f"MODAL_GPU names no GPU type: {primary!r}")
+    count = types[0].partition(":")[2]
+    for fallback in (item.strip() for item in fallbacks.split(",") if item.strip()):
+        candidate = f"{fallback}:{count}" if count and ":" not in fallback else fallback
+        if candidate.upper() not in {item.upper() for item in types}:
+            types.append(candidate)
+    return types if len(types) > 1 else types[0]
+
+
+_PRIMARY_GPU = os.environ.get("MODAL_GPU") or "L4"
+
+#: Fallback types tried after an ``L4`` request: A10 and L40S are also compute capability 8.0 or
+#: newer, so any of them can run the suite. Any other primary type gets no fallback unless
+#: ``MODAL_GPU_FALLBACKS`` names some; an empty value turns them off.
+_DEFAULT_FALLBACKS = "A10,L40S" if _PRIMARY_GPU.split(":")[0].strip().upper() == "L4" else ""
+
+#: GPU request for the tests: ``MODAL_GPU`` (default ``L4``) first, then its fallbacks.
+TEST_GPU = _gpu_request(_PRIMARY_GPU, os.environ.get("MODAL_GPU_FALLBACKS", _DEFAULT_FALLBACKS))
+
+#: GPU request for benchmarks: one type, so timings from different runs stay comparable.
+BENCHMARK_GPU = _gpu_request(_PRIMARY_GPU)
 
 #: Python version of the container image.
 PYTHON_VERSION = os.environ.get("MODAL_PYTHON_VERSION", "3.12")
@@ -89,7 +122,15 @@ image = (
     modal.Image.debian_slim(python_version=PYTHON_VERSION)
     .apt_install("git")
     .pip_install("uv")
-    # copy=True is required because dependencies are installed during the build.
+    # The dependency layer comes first and sees only pyproject.toml, so Modal reuses it until a
+    # dependency pin changes; a source change only rebuilds the small layers after it. copy=True
+    # is required because these files are used during the build.
+    .add_local_file("pyproject.toml", remote_path=f"{REMOTE_PROJECT_DIR}/pyproject.toml", copy=True)
+    .workdir(REMOTE_PROJECT_DIR)
+    # The pinned develop group installs the CUDA PyTorch wheel and Triton, so
+    # the container needs no CUDA base image of its own. The rfdetr group adds
+    # the RF-DETR integration tests.
+    .run_commands("uv pip install --system --group develop --group rfdetr")
     .add_local_dir(
         ".",
         remote_path=REMOTE_PROJECT_DIR,
@@ -108,14 +149,11 @@ image = (
             ".modal",
         ],
     )
-    .workdir(REMOTE_PROJECT_DIR)
-    # The pinned develop group installs the CUDA PyTorch wheel and Triton, so
-    # the container needs no CUDA base image of its own. The rfdetr group adds
-    # the RF-DETR integration tests; the check fails the image build unless the
-    # package is imported from the checkout, so no rfdetr dependency can swap
-    # in a released torch-hungarian and turn those tests into a no-op.
+    # Installing the checkout last replaces any released torch-hungarian that an rfdetr dependency
+    # pulled in. The check fails the image build unless the package is imported from the checkout,
+    # so no rfdetr dependency can turn those tests into a no-op.
     .run_commands(
-        "uv pip install --system -e . --group develop --group rfdetr",
+        "uv pip install --system -e .",
         f"cd /tmp && python -c {shlex.quote(_CHECKOUT_IMPORT_CHECK)}",
     )
 )
@@ -232,7 +270,7 @@ def _run_pytest(test_path: str, pytest_args: str) -> tuple[int, str]:
     return process.returncode, "".join(collected)
 
 
-@app.function(gpu=GPU_TYPE, timeout=RUN_TIMEOUT_SECONDS)
+@app.function(gpu=TEST_GPU, timeout=RUN_TIMEOUT_SECONDS)
 def run_tests(test_path: str = "tests/", pytest_args: str = "-v", min_devices: int = 1) -> RunResult:
     """Run the test suite on a Modal GPU, refusing an ineligible host.
 
@@ -262,7 +300,7 @@ def run_tests(test_path: str = "tests/", pytest_args: str = "-v", min_devices: i
     return {"returncode": returncode, "success": returncode == 0, "pytest_output": output}
 
 
-@app.function(gpu=GPU_TYPE, timeout=RUN_TIMEOUT_SECONDS)
+@app.function(gpu=BENCHMARK_GPU, timeout=RUN_TIMEOUT_SECONDS)
 def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "") -> RunResult:
     """Run one benchmark preset on a Modal GPU and return its JSONL records.
 
@@ -345,7 +383,7 @@ def _dispatch_benchmark(preset: str, benchmark_args: str) -> None:
     if preset not in BENCHMARK_PRESETS:
         sys.exit(f"unknown preset {preset!r}; choose from {', '.join(BENCHMARK_PRESETS)}")
     revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
-    print(f"{_SEPARATOR}\nGPU BENCHMARK\n{_SEPARATOR}\nGPU: {GPU_TYPE} | preset: {preset} | revision: {revision}")
+    print(f"{_SEPARATOR}\nGPU BENCHMARK\n{_SEPARATOR}\nGPU: {BENCHMARK_GPU} | preset: {preset} | revision: {revision}")
 
     result = run_benchmark.remote(preset=preset, benchmark_args=benchmark_args, git_revision=revision)
 
@@ -390,7 +428,7 @@ def main(
         return
     print(
         f"{_SEPARATOR}\nGPU TEST RUNNER\n{_SEPARATOR}\n"
-        f"GPU: {GPU_TYPE} | Python: {PYTHON_VERSION} | minimum eligible devices: {min_devices}\n"
+        f"GPU: {TEST_GPU} | Python: {PYTHON_VERSION} | minimum eligible devices: {min_devices}\n"
         f"Test path: {test_path} | pytest args: {pytest_args}\n{_SEPARATOR}"
     )
 

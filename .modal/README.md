@@ -11,7 +11,7 @@ Every test in `tests/unittests/test_triton.py` and `tests/integrations/test_rfde
 - the `triton` package,
 - at least `--min-devices` devices with compute capability 8.0 or newer.
 
-T4 (`sm_75`) therefore fails the gate rather than passing with a fully skipped suite. Use L4, A10G, A100, or H100.
+T4 (`sm_75`) therefore fails the gate rather than passing with a fully skipped suite. Use L4, A10, L40S, A100, or H100.
 
 ## Local use
 
@@ -24,6 +24,7 @@ modal run .modal/test_runner.py --test-path tests/unittests/test_triton.py --pyt
 modal run .modal/test_runner.py --test-path tests/integrations/
 MODAL_GPU=A100 modal run .modal/test_runner.py
 MODAL_GPU=L4:2 modal run .modal/test_runner.py --min-devices 2
+MODAL_GPU_FALLBACKS= modal run .modal/test_runner.py   # L4 only, no fallback
 modal run .modal/test_runner.py --benchmark-preset rfdetr --benchmark-args "--process-rounds 1"
 ```
 
@@ -47,4 +48,4 @@ Both label lanes trigger on `pull_request` and never on `pull_request_target`. G
 
 ## Cost
 
-Modal's free tier covers $30 of compute per month. This suite runs in a few minutes, so an L4 run costs roughly $0.01 and the free tier absorbs far more runs than this project produces. Cold runs also pay a one-time image build; later runs reuse the cached layers.
+The test lane asks for L4 and accepts A10 or L40S when L4 is unavailable. Modal's pricing page lists L4, A10 and L40S at $0.000222, $0.000306 and $0.000542 per second, about $0.80, $1.10 and $1.95 per hour. The benchmark lane stays on L4, because timings from different cards are not comparable. Modal's free tier covers $30 of compute per month. This suite runs in a few minutes, so an L4 run costs roughly $0.01 and the free tier absorbs far more runs than this project produces. Cold runs also pay a one-time image build. The image installs the dependency groups from `pyproject.toml` alone in its own layer, ahead of the source copy, so a source-only change reuses that layer and rebuilds only the checkout install, and a change to the dependency pins rebuilds all of it.
