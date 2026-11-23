@@ -4,13 +4,19 @@ import importlib
 import re
 import sys
 import warnings
+from collections.abc import Callable
 from types import ModuleType
+from typing import Any, Literal
 
 import torch
 from scipy.optimize import linear_sum_assignment
 
 _CUDA_FALLBACK_WARNING_EMITTED = False
 _TRITON_MINIMUM_TORCH_VERSION = (2, 4)
+
+#: How much of the Triton solve's input checking ``batch_linear_assignment_indices`` performs.
+ValidateMode = Literal["full", "off"]
+_VALIDATE_MODES: frozenset[str] = frozenset({"full", "off"})
 
 
 def _prepare_solver_cost(cost: torch.Tensor) -> torch.Tensor:
@@ -72,21 +78,71 @@ def _warn_cuda_fallback() -> None:
     warnings.warn(
         "Triton linear-assignment support is unavailable for this CUDA input; using SciPy on CPU.",
         RuntimeWarning,
-        stacklevel=3,
+        stacklevel=4,
     )
+
+
+def _run_on_cost_device(cost: torch.Tensor, solve: Callable[[], Any]) -> Any:
+    """Call ``solve`` with the cost's GPU current; the Triton launch goes to the current device.
+
+    The guard is skipped for the common case, where the device is already current.
+    """
+    if cost.device.index == torch.cuda.current_device():
+        return solve()
+    with torch.cuda.device(cost.device):
+        return solve()
+
+
+def _require_triton_backend() -> ModuleType:
+    """Return the Triton module, or raise when the caller bypassed the eligibility check."""
+    backend = _load_triton_backend()
+    if backend is None:
+        raise RuntimeError("Triton is unavailable for CUDA linear assignment.")
+    return backend
 
 
 def batch_linear_assignment_cuda(cost: torch.Tensor) -> torch.Tensor:
     """Solve a CUDA batch through the private Triton implementation."""
-    backend = _load_triton_backend()
-    if backend is None:
-        raise RuntimeError("Triton is unavailable for CUDA linear assignment.")
-    # The Triton launch goes to the current device, so a cost on another GPU needs its own device
-    # made current. The guard is skipped for the common case, where it already is.
-    if cost.device.index == torch.cuda.current_device():
-        return backend.batch_linear_assignment(cost)
-    with torch.cuda.device(cost.device):
-        return backend.batch_linear_assignment(cost)
+    backend = _require_triton_backend()
+    return _run_on_cost_device(cost, lambda: backend.batch_linear_assignment(cost))
+
+
+def _prefers_host(batch_size: int, workers: int, tasks: int) -> bool:
+    """Return whether a batch this small is faster solved by SciPy than launched on the GPU.
+
+    One problem, two problems up to 64 wide, and up to four problems up to 32 wide lose to the host
+    solve even after the transfers; larger batches amortise the launch.
+    """
+    larger_side = max(workers, tasks)
+    return batch_size == 1 or (batch_size == 2 and larger_side <= 64) or (batch_size <= 4 and larger_side <= 32)
+
+
+def _check_cost(cost: torch.Tensor) -> None:
+    """Raise the documented errors for a cost of the wrong rank or a complex dtype."""
+    if cost.ndim != 3:
+        raise ValueError("Need 3-dimensional tensor with shape (B, W, T).")
+    if cost.is_complex():
+        raise TypeError("Complex costs are not supported.")
+
+
+def _uses_triton(cost: torch.Tensor) -> bool:
+    """Return whether this cost goes to the Triton solve, warning once when a CUDA cost cannot.
+
+    A batch small enough for SciPy to win is routed to the host on purpose, without a warning.
+    """
+    if not cost.is_cuda:
+        return False
+    if not _cuda_uses_triton(cost):
+        _warn_cuda_fallback()
+        return False
+    return not _prefers_host(*cost.shape)
+
+
+def _solve_on_host(cost: torch.Tensor) -> torch.Tensor:
+    """Solve with SciPy on host memory, so any non-CPU device, such as CUDA, MPS or XPU, is copied first."""
+    if cost.device.type != "cpu":
+        cost = cost.cpu()
+    return batch_linear_assignment_cpu(cost)
 
 
 def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
@@ -108,21 +164,65 @@ def batch_linear_assignment(cost: torch.Tensor) -> torch.Tensor:
       ValueError: If costs have the wrong rank, invalid numeric entries, or no
         feasible matching.
     """
-    if cost.ndim != 3:
-        raise ValueError("Need 3-dimensional tensor with shape (B, W, T).")
-    if cost.is_complex():
-        raise TypeError("Complex costs are not supported.")
-    if cost.is_cuda and _cuda_uses_triton(cost):
+    _check_cost(cost)
+    if _uses_triton(cost):
         return batch_linear_assignment_cuda(cost)
 
     # SciPy works on host memory, so any other device, such as MPS or XPU, is solved on the host
     # and the assignment is returned on the input's device.
-    device = cost.device
-    if cost.is_cuda:
-        _warn_cuda_fallback()
-    if device.type != "cpu":
-        cost = cost.cpu()
-    return batch_linear_assignment_cpu(cost).to(device)
+    return _solve_on_host(cost).to(cost.device)
+
+
+def batch_linear_assignment_indices(
+    cost: torch.Tensor,
+    *,
+    validate: ValidateMode = "full",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Solve a batch and return the matched pairs as ``(rows, cols)`` of a fixed shape.
+
+    The pairs follow SciPy's ``linear_sum_assignment``: ``rows`` is sorted within each problem and
+    ``cols[b, i]`` is the task assigned to worker ``rows[b, i]``. Both tensors are ``torch.long``,
+    live on the input's device, and have shape ``(B, min(W, T))``, so no output size depends on the
+    data. Unlike ``batch_linear_assignment`` followed by ``assignment_to_indices``, the Triton path
+    needs no host read after the solve.
+
+    Args:
+      cost: Cost matrix with shape (B, W, T), where W is the number of workers
+            and T is the number of tasks.
+      validate: ``"full"`` checks for invalid numeric entries and an infeasible matrix, which costs
+            two host reads per call. ``"off"`` skips both reads, so the call can be captured in a
+            CUDA graph after one warm-up call, but a NaN, ``-inf`` or infeasible cost is then
+            unchecked and returns unspecified indices. It affects only the Triton path; SciPy
+            always validates.
+
+    Returns:
+      The pair ``(rows, cols)``, each with shape (B, min(W, T)).
+
+    Raises:
+      TypeError: If costs have a complex dtype.
+      ValueError: If ``validate`` is unknown, or, under ``"full"``, if costs have the wrong rank,
+        invalid numeric entries, or no feasible matching.
+
+    Examples:
+      >>> cost = torch.tensor([[[4.0, 1.0, 3.0], [2.0, 0.0, 5.0], [3.0, 2.0, 2.0]]])
+      >>> rows, cols = batch_linear_assignment_indices(cost)
+      >>> rows.tolist(), cols.tolist()
+      ([[0, 1, 2]], [[1, 0, 2]])
+    """
+    if validate not in _VALIDATE_MODES:
+        raise ValueError(f"Unknown validate mode: {validate!r}.")
+    _check_cost(cost)
+    if _uses_triton(cost):
+        backend = _require_triton_backend()
+        return _run_on_cost_device(cost, lambda: backend.batch_linear_assignment_indices(cost, validation=validate))
+
+    batch_size, workers, tasks = cost.shape
+    assignment = _solve_on_host(cost)
+    if batch_size == 0 or workers == 0 or tasks == 0:
+        rows = torch.zeros((batch_size, min(workers, tasks)), dtype=torch.long)
+        return rows.to(cost.device), rows.clone().to(cost.device)
+    rows, cols = assignment_to_indices(assignment)
+    return rows.to(cost.device), cols.to(cost.device)
 
 
 def assignment_to_indices(

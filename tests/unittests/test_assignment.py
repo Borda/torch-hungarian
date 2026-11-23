@@ -11,7 +11,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 
 import torch_linear_assignment.assignment as assignment_module
-from torch_linear_assignment import batch_linear_assignment
+from torch_linear_assignment import batch_linear_assignment, batch_linear_assignment_indices
 
 
 def scipy_assignment(cost):
@@ -432,6 +432,211 @@ def test_batch_linear_assignment_cuda_launches_on_the_cost_device(monkeypatch, c
     assert launched_on == [cost_index]
     assert entered_indices == entered
     assert state["current"] == current_index
+
+
+def scipy_indices(cost):
+    """Return SciPy's ``(row_ind, col_ind)`` stacked over the batch, the oracle for the indices API."""
+    pairs = [linear_sum_assignment(matrix.numpy(), maximize=False) for matrix in cost]
+    rows = torch.stack([torch.from_numpy(row_ind) for row_ind, _ in pairs]).long()
+    cols = torch.stack([torch.from_numpy(col_ind) for _, col_ind in pairs]).long()
+    return rows, cols
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(3, 4, 4), (2, 6, 3), (2, 3, 6), (1, 1, 5), (4, 5, 1), (2, 40, 7), (2, 7, 40)],
+    ids=["square", "tall", "wide", "one-worker", "one-task", "very-tall", "very-wide"],
+)
+def test_batch_linear_assignment_indices_match_scipy_pairs(shape):
+    """Return SciPy's row-sorted pairs, of static shape (B, min(W, T)), for every orientation."""
+    cost = torch.rand(shape, generator=torch.Generator().manual_seed(shape[1] * 31 + shape[2]))
+
+    rows, cols = batch_linear_assignment_indices(cost)
+
+    expected_rows, expected_cols = scipy_indices(cost)
+    assert rows.shape == cols.shape == (shape[0], min(shape[1:]))
+    assert rows.dtype == cols.dtype == torch.long
+    assert torch.equal(rows, expected_rows)
+    assert torch.equal(cols, expected_cols)
+
+
+def test_batch_linear_assignment_indices_agree_with_the_assignment():
+    """Place every returned pair where the assignment tensor puts it."""
+    cost = torch.rand((3, 9, 5), generator=torch.Generator().manual_seed(8))
+    assignment = batch_linear_assignment(cost)
+
+    rows, cols = batch_linear_assignment_indices(cost)
+
+    assert torch.equal(assignment.gather(1, rows), cols)
+    assert int((assignment >= 0).sum()) == rows.numel()
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [((0, 4, 3), (0, 3)), ((2, 0, 3), (2, 0)), ((2, 4, 0), (2, 0)), ((0, 0, 0), (0, 0))],
+    ids=["no-batch", "no-workers", "no-tasks", "all-empty"],
+)
+def test_batch_linear_assignment_indices_keep_the_static_shape_for_empty_costs(shape, expected):
+    """Return empty pairs whose shape is still (B, min(W, T))."""
+    rows, cols = batch_linear_assignment_indices(torch.zeros(shape))
+
+    assert rows.shape == cols.shape == expected
+    assert rows.dtype == cols.dtype == torch.long
+
+
+@pytest.mark.parametrize("validate", ["full", "off"])
+def test_batch_linear_assignment_indices_accept_both_validate_modes_on_the_host(validate):
+    """Give the same pairs under either mode, since SciPy validates on every host path."""
+    cost = torch.rand((2, 5, 5), generator=torch.Generator().manual_seed(2))
+
+    rows, cols = batch_linear_assignment_indices(cost, validate=validate)
+
+    expected_rows, expected_cols = scipy_indices(cost)
+    assert torch.equal(rows, expected_rows)
+    assert torch.equal(cols, expected_cols)
+
+
+def test_batch_linear_assignment_indices_accept_costs_requiring_grad():
+    """Solve a gradient-bearing cost without touching its autograd graph."""
+    cost = torch.rand((2, 4, 6), generator=torch.Generator().manual_seed(4), requires_grad=True)
+
+    rows, cols = batch_linear_assignment_indices(cost)
+
+    assert not rows.requires_grad
+    assert not cols.requires_grad
+    assert cost.requires_grad
+    assert torch.equal(rows, scipy_indices(cost.detach())[0])
+
+
+@pytest.mark.parametrize(
+    ("cost", "error", "message"),
+    [
+        pytest.param(torch.zeros(3, 3), ValueError, "Need 3-dimensional tensor", id="rank"),
+        pytest.param(torch.zeros(1, 2, 2, dtype=torch.complex64), TypeError, "Complex costs", id="complex"),
+        pytest.param(torch.zeros(0, 2, 2, dtype=torch.complex64), TypeError, "Complex costs", id="complex-empty"),
+        pytest.param(torch.tensor([[[0.0, float("nan")]]]), ValueError, "invalid numeric entries", id="nan"),
+        pytest.param(torch.full((1, 2, 2), float("inf")), ValueError, "infeasible", id="infeasible"),
+    ],
+)
+def test_batch_linear_assignment_indices_raise_the_assignment_errors(cost, error, message):
+    """Reject the inputs batch_linear_assignment rejects, with the same exception types."""
+    with pytest.raises(error, match=message):
+        batch_linear_assignment_indices(cost)
+
+
+def test_batch_linear_assignment_indices_reject_an_unknown_validate_mode():
+    """Name the bad mode instead of treating it as one of the two."""
+    with pytest.raises(ValueError, match="Unknown validate mode: 'deferred'"):
+        batch_linear_assignment_indices(torch.zeros(1, 2, 2), validate="deferred")
+
+
+def test_batch_linear_assignment_indices_solve_other_accelerators_on_host(monkeypatch):
+    """Return the pairs on the input's device after a host solve, as the assignment does."""
+    host_cost = torch.rand((2, 4, 6), generator=torch.Generator().manual_seed(6))
+    solved_on = []
+    real_solver = assignment_module.batch_linear_assignment_cpu
+
+    def host_solver(cost):
+        solved_on.append(cost.device)
+        return real_solver(cost)
+
+    monkeypatch.setattr(assignment_module, "batch_linear_assignment_cpu", host_solver)
+
+    rows, cols = batch_linear_assignment_indices(_device_proxy(host_cost, "meta"))
+
+    assert solved_on == [torch.device("cpu")]
+    assert rows.device.type == cols.device.type == "meta"
+    assert rows.shape == cols.shape == (2, 4)
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "side", "host"),
+    [
+        (1, 4, True),
+        (1, 4096, True),
+        (2, 64, True),
+        (2, 65, False),
+        (3, 32, True),
+        (3, 33, False),
+        (4, 32, True),
+        (4, 33, False),
+        (5, 8, False),
+        (208, 300, False),
+        (0, 300, False),
+    ],
+)
+@pytest.mark.parametrize("orientation", ["tall", "wide"])
+def test_prefers_host_follows_the_measured_routing_rule(batch_size, side, host, orientation):
+    """Route one problem, two up to 64 wide, and up to four up to 32 wide to SciPy, whichever side is larger."""
+    workers, tasks = (side, 2) if orientation == "tall" else (2, side)
+
+    assert assignment_module._prefers_host(batch_size, workers, tasks) is host
+
+
+@pytest.mark.parametrize(
+    ("shape", "eligible", "uses_triton", "warns"),
+    [
+        pytest.param((8, 300, 30), True, True, False, id="large-batch-goes-to-triton"),
+        pytest.param((1, 300, 30), True, False, False, id="single-problem-routes-to-host-silently"),
+        pytest.param((8, 300, 30), False, False, True, id="ineligible-gpu-warns-and-falls-back"),
+        pytest.param((1, 300, 30), False, False, True, id="ineligible-gpu-warns-even-for-one-problem"),
+    ],
+)
+def test_cuda_cost_dispatch_routes_small_batches_to_the_host_without_a_warning(
+    monkeypatch, shape, eligible, uses_triton, warns
+):
+    """Warn about the fallback only when Triton is unavailable, never for a deliberate small-batch route."""
+    monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
+    monkeypatch.setattr(assignment_module, "_cuda_uses_triton", lambda _: eligible)
+    cost = SimpleNamespace(is_cuda=True, shape=shape)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        decision = assignment_module._uses_triton(cost)
+
+    assert decision is uses_triton
+    assert bool(caught) is warns
+
+
+@pytest.mark.parametrize("public_call", [batch_linear_assignment, batch_linear_assignment_indices])
+def test_cuda_fallback_warning_points_at_the_caller_of_the_public_function(monkeypatch, public_call):
+    """Attribute the once-only fallback warning to the user's call, not to the package's dispatch frames."""
+    monkeypatch.setattr(assignment_module, "_CUDA_FALLBACK_WARNING_EMITTED", False)
+    monkeypatch.setattr(assignment_module, "_cuda_uses_triton", lambda _: False)
+    monkeypatch.setattr(assignment_module, "_solve_on_host", lambda _cost: torch.zeros((8, 2), dtype=torch.long))
+    monkeypatch.setattr(
+        assignment_module, "assignment_to_indices", lambda _assignment: (torch.zeros(8, 2), torch.zeros(8, 2))
+    )
+    cost = SimpleNamespace(is_cuda=True, ndim=3, shape=(8, 2, 2), device=torch.device("meta"), is_complex=lambda: False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        public_call(cost)
+
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+
+
+def test_batch_linear_assignment_indices_pass_validate_to_the_triton_backend(monkeypatch):
+    """Send the validate mode to the backend and run it with the cost's GPU current."""
+    seen = []
+
+    def backend_indices(cost, *, validation):
+        seen.append(validation)
+        return "pairs"
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(assignment_module, "_uses_triton", lambda _: True)
+    monkeypatch.setattr(
+        assignment_module,
+        "_require_triton_backend",
+        lambda: SimpleNamespace(batch_linear_assignment_indices=backend_indices),
+    )
+    cost = _device_proxy(torch.zeros(8, 2, 2), "cuda:0")
+
+    assert batch_linear_assignment_indices(cost) == "pairs"
+    assert batch_linear_assignment_indices(cost, validate="off") == "pairs"
+    assert seen == ["full", "off"]
 
 
 class TestAssignment(TestCase):

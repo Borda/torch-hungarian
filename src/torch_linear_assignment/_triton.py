@@ -336,12 +336,8 @@ def _solve(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor
     return col4row.view(batch_size, rows), row4col.view(batch_size, columns)
 
 
-def batch_linear_assignment(
-    cost: torch.Tensor,
-    *,
-    validation: ValidationMode = "full",
-) -> torch.Tensor:
-    """Solve real CUDA costs; private validation modes never permit complex input."""
+def _prepare(cost: torch.Tensor, validation: ValidationMode) -> torch.Tensor:
+    """Check a CUDA cost and return it in the solver dtype; private modes never permit complex input."""
     _validate_mode(validation)
     if cost.ndim != 3:
         raise ValueError("Need 3-dimensional tensor with shape (B, W, T).")
@@ -351,15 +347,54 @@ def batch_linear_assignment(
         raise TypeError("Complex costs are not supported.")
     if validation in {"full", "nonfinite_only"}:
         _reject_invalid_numeric_entries(cost)
+    return _solver_cost_dtype(cost)
 
-    cost = _solver_cost_dtype(cost)
+
+def _solve_oriented(cost: torch.Tensor, validation: ValidationMode) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Solve with the smaller side as rows; return its row and column maps and whether the cost was tall."""
+    _, workers, tasks = cost.shape
+    with torch.amp.autocast("cuda", enabled=False):
+        if tasks < workers:
+            # Rows are tasks here: `col4row` names each task's worker and `row4col` each worker's task.
+            col4row, row4col = _solve(cost.transpose(1, 2).contiguous(), validation)
+            return col4row, row4col, True
+        col4row, row4col = _solve(cost.contiguous(), validation)
+        return col4row, row4col, False
+
+
+def batch_linear_assignment(
+    cost: torch.Tensor,
+    *,
+    validation: ValidationMode = "full",
+) -> torch.Tensor:
+    """Solve real CUDA costs; private validation modes never permit complex input."""
+    cost = _prepare(cost, validation)
     batch_size, workers, tasks = cost.shape
     if batch_size == 0 or workers == 0 or tasks == 0:
         return _empty_assignment(cost)
 
-    with torch.amp.autocast("cuda", enabled=False):
-        if tasks < workers:
-            _, row4col = _solve(cost.transpose(1, 2).contiguous(), validation)
-            return row4col.to(torch.long)
-        col4row, _ = _solve(cost.contiguous(), validation)
-        return col4row.to(torch.long)
+    col4row, row4col, tall = _solve_oriented(cost, validation)
+    # A tall cost returns the per-worker task map directly, without rebuilding it from `col4row`.
+    return (row4col if tall else col4row).to(torch.long)
+
+
+def batch_linear_assignment_indices(
+    cost: torch.Tensor,
+    *,
+    validation: ValidationMode = "full",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Solve real CUDA costs and return row-sorted ``(rows, cols)`` of static shape ``(B, min(W, T))``."""
+    cost = _prepare(cost, validation)
+    batch_size, workers, tasks = cost.shape
+    if batch_size == 0 or workers == 0 or tasks == 0:
+        empty = torch.zeros((batch_size, min(workers, tasks)), dtype=torch.long, device=cost.device)
+        return empty, empty.clone()
+
+    col4row, _, tall = _solve_oriented(cost, validation)
+    col4row = col4row.to(torch.long)
+    if tall:
+        # Every task has a worker, and sorting by worker puts the pairs in SciPy's row order.
+        rows, cols = torch.sort(col4row, dim=1)
+        return rows, cols
+    rows = torch.arange(workers, device=cost.device).expand(batch_size, workers).contiguous()
+    return rows, col4row

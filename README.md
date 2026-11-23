@@ -73,15 +73,39 @@ tensor([[0, 1, 3]])
 tensor([[0, 2, 1]])
 ```
 
+`batch_linear_assignment_indices(cost)` returns the same `(row_ind, col_ind)` pair in one call. Both tensors are `torch.long`, live on the input's device, and have the fixed shape `(B, min(W, T))`, so the Triton path needs no host read after the solve:
+
+```python
+from torch_linear_assignment import batch_linear_assignment_indices
+
+row_ind, col_ind = batch_linear_assignment_indices(cost)
+```
+
+By default (`validate="full"`) it checks for NaN, `-inf` and an infeasible matrix, which costs two host reads. `validate="off"` skips both, so the call can be captured in a CUDA graph. Run it once first so the kernel compiles and the workspaces exist, then capture and replay. A NaN, `-inf` or infeasible cost is unchecked under `"off"` and returns unspecified indices. SciPy-backed calls always validate:
+
+```python
+static_cost = torch.rand(208, 300, 12, device="cuda")
+batch_linear_assignment_indices(static_cost, validate="off")  # warm-up: compile and allocate
+
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):
+    rows, cols = batch_linear_assignment_indices(static_cost, validate="off")
+
+static_cost.copy_(next_cost)  # same shape and dtype as the captured input
+graph.replay()  # rows and cols now hold the pairs for next_cost
+```
+
 ## Support
 
-The public API is `batch_linear_assignment(cost)` with cost shape `(B, W, T)`. Assignments have shape `(B, W)`, use `torch.long`, and contain `-1` for an unmatched worker.
+The public API is `batch_linear_assignment(cost)` and `batch_linear_assignment_indices(cost)` with cost shape `(B, W, T)`. Assignments have shape `(B, W)`, use `torch.long`, and contain `-1` for an unmatched worker.
 
 | Input and runtime                                                                                                                                         | Backend and behavior                                                               |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | CPU input on any supported OS                                                                                                                             | SciPy on CPU. This remains the reference path.                                     |
 | Linux NVIDIA GPU with compute capability 8.0 or newer, Torch >= 2.4, and Triton available                                                                 | Lazy Triton CUDA backend. The first call can include Triton compilation.           |
 | CUDA input on an unsupported OS; non-NVIDIA Linux accelerator; NVIDIA GPU below compute capability 8.0 (including T4); or missing/ineligible Triton/Torch | Warn once, solve with SciPy on CPU, and return the assignment on the input device. |
+
+A CUDA input on a supported GPU is still solved on the host, without the fallback warning, when the batch is too small to pay for a launch: one problem, two problems with `max(W, T) <= 64`, or up to four problems with `max(W, T) <= 32`. SciPy wins there even after the transfers, and the result returns on the input's device either way. Call the private Triton backend directly if you need the kernel at those sizes.
 
 The solver promotes `float16`, `bfloat16`, and integer costs to `float32`; `float64` costs remain `float64`. Triton execution disables autocast, so precision already lost before entry cannot be recovered.
 

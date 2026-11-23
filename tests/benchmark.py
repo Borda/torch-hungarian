@@ -54,7 +54,8 @@ _VALIDATION_MODES = (
 #: Default workload, a cross product of one worker count with tasks and batches.
 _DEFAULT_WORKERS = 300
 _DEFAULT_TASKS = [100, 300, 600]
-_DEFAULT_BATCHES = [1, 16, 50, 208, 624]
+# One problem is routed to SciPy by the public call, so a default case of 1 would not measure the GPU.
+_DEFAULT_BATCHES = [16, 50, 208, 624]
 
 #: Named workloads as explicit ``(batch, workers, tasks)`` triples, for shapes a cross product
 #: over a single worker count cannot express.

@@ -514,7 +514,7 @@ def test_default_arguments_keep_the_single_worker_cross_product(monkeypatch: pyt
 
     assert arguments.preset is None
     assert benchmark._case_shapes(arguments) == [
-        (batch, 300, tasks) for batch in (1, 16, 50, 208, 624) for tasks in (100, 300, 600)
+        (batch, 300, tasks) for batch in (16, 50, 208, 624) for tasks in (100, 300, 600)
     ]
 
 

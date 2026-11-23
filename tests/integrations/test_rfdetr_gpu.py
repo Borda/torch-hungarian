@@ -51,6 +51,10 @@ def _count_calls(monkeypatch: pytest.MonkeyPatch, owner: object, name: str) -> l
 def triton_device(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> tuple[torch.device, list[Any]]:
     """Provide an eligible CUDA device and a log of compiled-backend solves."""
     backend = importlib.import_module("torch_linear_assignment._triton")
+    # The kernel is under test here, so keep the small-batch route to SciPy out of the way.
+    monkeypatch.setattr(
+        importlib.import_module("torch_linear_assignment.assignment"), "_prefers_host", lambda *_: False
+    )
     calls: list[Any] = []
     original = backend._solve
 
