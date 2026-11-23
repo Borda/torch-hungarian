@@ -13,7 +13,7 @@ on:
         required: false
         default: ""
       gpu:
-        description: "Modal GPU request; compute capability 8.0+ only, so no T4"
+        description: "Modal GPU request; compute capability 8.0+ only, so no T4. L4 also allows A10 and L40S"
         required: false
         default: "L4"
       min_devices:
@@ -25,7 +25,12 @@ permissions:
   contents: read
 
 jobs:
-  gpu-tests:
+  gpu-tests-dispatch:
+    # The report job only comments on pull requests, but a caller must grant what a called job asks for.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/_modal-gpu-tests.yml
     with:
       ref: ${{ inputs.ref || github.sha }}

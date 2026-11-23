@@ -1,0 +1,45 @@
+name: Modal GPU Benchmarks
+
+# Manual trigger for the benchmark presets. The runs, the results table and the run summary live in
+# _modal-gpu-benchmarks.yml, which trigger-gpu-labels.yml also calls for the `gpu-benchmarks` label.
+# A run costs real money and needs the Modal credentials, so it never runs on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to benchmark"
+        required: false
+        default: ""
+      gpu:
+        description: "Modal GPU request; compute capability 8.0+ only, so no T4"
+        required: false
+        default: "L4"
+      preset:
+        description: "Benchmark preset to run"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "rfdetr", "wide"]
+      benchmark_args:
+        description: "Extra benchmark arguments, such as --process-rounds 1"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-benchmarks-dispatch:
+    # The report job needs these; a caller can only pass on permissions it holds itself.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/_modal-gpu-benchmarks.yml
+    with:
+      ref: ${{ inputs.ref }}
+      gpu: ${{ inputs.gpu || 'L4' }}
+      preset: ${{ inputs.preset }}
+      benchmark_args: ${{ inputs.benchmark_args }}
+    secrets: inherit
