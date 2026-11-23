@@ -7,6 +7,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { testedCommitLine } = require('./tested-commit.js');
+
 // GitHub rejects a comment over 65536 characters. The tables are sized to fit the budget, and
 // the hard limit is only reached when the headings and limitations alone are too long.
 const COMMENT_BUDGET = 60000;
@@ -106,8 +108,9 @@ function buildSection({ preset, result, outputDir }) {
  * no mix of failures and tables can push the comment over GitHub's limit. The run summary takes
  * the full text; the comment falls back to a pointer only if it is still too long.
  */
-function buildReport({ presets, jobResult, gpu, presetResults = {}, outputDir, runUrl }) {
-  const head = `## ${icon(jobResult)} GPU benchmark results\n\n**Job result:** ${icon(jobResult)} \`${jobResult}\` · **GPU:** ${gpu}\n\n`;
+function buildReport({ presets, jobResult, gpu, presetResults = {}, outputDir, runUrl, commitLine = '' }) {
+  const commit = commitLine ? `${commitLine}\n\n` : '';
+  const head = `## ${icon(jobResult)} GPU benchmark results\n\n**Job result:** ${icon(jobResult)} \`${jobResult}\` · **GPU:** ${gpu}\n\n${commit}`;
   const link = `[Workflow run](${runUrl})`;
   const sections = presets.map(preset => buildSection({ preset, result: presetResults[preset] ?? jobResult, outputDir }));
 
@@ -145,6 +148,7 @@ async function report({ github, context, core, env = process.env, outputDir = 't
     jobResult: env.JOB_RESULT,
     gpu: env.GPU,
     presetResults: await readPresetResults({ github, context, core }),
+    commitLine: await testedCommitLine({ github, context, sha: env.TESTED_SHA }),
     outputDir,
     runUrl: `${context.payload.repository.html_url}/actions/runs/${context.runId}`,
   });

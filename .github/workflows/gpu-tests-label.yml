@@ -29,6 +29,14 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+    # Only the comment helper is needed. It comes from the commit the tests ran on.
+    - id: checkout
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        sparse-checkout: .github/scripts
+        persist-credentials: false
+
     - name: Download the pytest log
       id: download
       continue-on-error: true
@@ -41,15 +49,19 @@ jobs:
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
       env:
         GPU_JOB_RESULT: ${{ needs.gpu-tests.result }}
+        # The commit the tests ran on; the run can start well after the label.
+        TESTED_SHA: ${{ steps.checkout.outputs.commit }}
       with:
         script: |
           const fs = require('fs');
+          const { testedCommitLine } = require('./.github/scripts/tested-commit.js');
           const path = 'test-outputs/pytest-output.log';
           const jobResult = process.env.GPU_JOB_RESULT;
 
           // A green check or a red cross up front, so the outcome is clear while scrolling the thread.
           const icon = jobResult === 'success' ? '✅' : '❌';
           let comment = `## ${icon} GPU test results\n\n**Job result:** ${icon} \`${jobResult}\`\n\n`;
+          comment += `${await testedCommitLine({ github, context, sha: process.env.TESTED_SHA })}\n\n`;
 
           if (fs.existsSync(path)) {
             // eslint-disable-next-line no-control-regex

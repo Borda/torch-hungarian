@@ -105,7 +105,8 @@ jobs:
     steps:
     # Only the report script is needed. It comes from the same ref the benchmark ran, so a
     # change to the script is exercised by the pull request that makes it.
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+    - id: checkout
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         ref: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
         sparse-checkout: .github/scripts
@@ -124,6 +125,8 @@ jobs:
       env:
         JOB_RESULT: ${{ needs.benchmark.result }}
         GPU: ${{ inputs.gpu || 'L4' }}
+        # The commit the benchmark jobs checked out; the run can start well after the label.
+        TESTED_SHA: ${{ steps.checkout.outputs.commit }}
       with:
         script: |
           const report = require('./.github/scripts/gpu-benchmark-report.js');
