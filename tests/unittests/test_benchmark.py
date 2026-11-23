@@ -1640,28 +1640,26 @@ def test_main_exits_nonzero_after_parity_failure(
 
 
 @pytest.mark.parametrize(
-    ("total", "interactive", "expected"),
+    ("total", "first", "lines"),
     [
-        pytest.param(324, True, {"desc": "Benchmark cases", "unit": "case"}, id="terminal-redraws-every-case"),
-        pytest.param(
-            324,
-            False,
-            {"desc": "Benchmark cases", "unit": "case", "miniters": 16, "mininterval": 0},
-            id="log-prints-every-five-percent",
-        ),
-        pytest.param(
-            7,
-            False,
-            {"desc": "Benchmark cases", "unit": "case", "miniters": 1, "mininterval": 0},
-            id="log-with-few-cases-prints-each",
-        ),
+        pytest.param(36, 2, 18, id="wide-two-rounds"),
+        pytest.param(37, 2, 19, id="partial-final-interval"),
+        pytest.param(7, 1, 7, id="short-run"),
     ],
 )
-def test_progress_options_limit_log_output_to_every_five_percent(
-    total: int, interactive: bool, expected: dict[str, object]
+def test_nonterminal_progress_writes_bounded_completion_lines(
+    capsys: pytest.CaptureFixture[str], total: int, first: int, lines: int
 ) -> None:
-    """Prevent a non-interactive log from getting one progress line per benchmark case."""
-    assert benchmark._progress_options(total, interactive=interactive) == expected
+    """Capture real stderr milestones through completion without terminal control characters."""
+    cases = [(0, "scipy", "full", 1, 2, 2, "float32")] * total
+
+    assert list(benchmark._benchmark_progress(cases, interactive=False)) == cases
+
+    output = capsys.readouterr().err
+    expected_counts = [*range(first, total, first), total]
+    assert "\r" not in output
+    assert output.count("\n") == lines
+    assert output.splitlines() == [f"Benchmark cases: {completed}/{total}" for completed in expected_counts]
 
 
 def test_main_tracks_the_complete_case_matrix_with_one_progress_bar(

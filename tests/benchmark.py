@@ -1444,13 +1444,20 @@ def _skip_run(
         raise SystemExit(1)
 
 
-def _progress_options(total: int, *, interactive: bool) -> dict[str, Any]:
-    """Return the progress bar options: a live bar in a terminal, one line per 5% in a log."""
-    options: dict[str, Any] = {"desc": "Benchmark cases", "unit": "case"}
-    if not interactive:
-        # A log cannot redraw a bar, so every refresh would be a new line, one per case.
-        options.update(miniters=max(1, total // 20), mininterval=0)
-    return options
+def _benchmark_progress(
+    cases: list[tuple[int, str, str, int, int, int, str]], *, interactive: bool
+) -> Iterable[tuple[int, str, str, int, int, int, str]]:
+    """Yield cases with a live terminal bar or up to twenty completed-case log lines."""
+    if interactive:
+        yield from tqdm(cases, desc="Benchmark cases", unit="case")
+        return
+
+    total = len(cases)
+    interval = max(1, (total + 19) // 20)
+    for completed, case in enumerate(cases, start=1):
+        yield case
+        if completed % interval == 0 or completed == total:
+            print(f"Benchmark cases: {completed}/{total}", file=sys.stderr, flush=True)
 
 
 def main() -> None:
@@ -1478,8 +1485,8 @@ def main() -> None:
         return
 
     cases = _case_matrix(arguments)
-    for process_round, backend, validation, batch, workers, tasks, dtype_name in tqdm(
-        cases, **_progress_options(len(cases), interactive=sys.stderr.isatty())
+    for process_round, backend, validation, batch, workers, tasks, dtype_name in _benchmark_progress(
+        cases, interactive=sys.stderr.isatty()
     ):
         specification = {
             "run_id": run_id,

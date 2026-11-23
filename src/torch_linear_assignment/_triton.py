@@ -10,10 +10,10 @@ Scope:
     One Triton program solves one batch item. The program is intentionally
     correctness-first: outer augmenting-path steps remain sequential while each
     current set of candidate columns is processed as a masked lane vector.
-    Per-search state remains program-local. The matrix dimensions are runtime
-    arguments, so one binary serves every shape in a power-of-two column bucket,
-    and each program subtracts every row's minimum before the search so float32
-    potentials stay exact. The correctness launch currently
+    Per-search state remains program-local. Runtime matrix dimensions allow shapes
+    in a column bucket to share a compiled variant for a fixed target, dtype and
+    pointer alignment. Each program uses row offsets only when every finite
+    subtraction is safe. The correctness launch currently
     keeps its loop-carried vectors within one warp; wider launch configurations
     remain gated on exact GPU parity. Its ordering reproduces the legacy CUDA
     and SciPy rectangular-LSAP algorithm.
@@ -53,8 +53,7 @@ ValidationMode = Literal["full", "off", "nonfinite_only", "infeasibility_flag_on
 _VALIDATION_MODES: frozenset[str] = frozenset({"full", "off", "nonfinite_only", "infeasibility_flag_only"})
 
 
-# The matrix dimensions are runtime arguments so one binary serves every shape in a ``BLOCK_N`` bucket;
-# as constexprs, each distinct target count compiled its own kernel.
+# Runtime matrix dimensions remove row and column counts as separate specialization keys.
 @triton.jit(do_not_specialize=["NUM_ROWS", "NUM_COLUMNS"])
 def _linear_assignment_kernel(
     cost,
@@ -83,13 +82,19 @@ def _linear_assignment_kernel(
     row4col = row4col + batch_index * NUM_COLUMNS
     rowmin = rowmin + batch_index * NUM_ROWS
 
-    # Row reduction: every solver row is assigned exactly once, so subtracting its minimum keeps the
-    # optimum. Float32 potentials built from large offsets otherwise round to a strictly worse
-    # assignment than SciPy. The minimum is zero for an all-``+inf`` row, which stays infeasible.
+    # Every solver row is assigned once. Sterbenz's lemma guarantees exact subtraction
+    # when positive finite costs are within a factor of two of their row minimum.
+    # If any row is unsafe, keep the original search arithmetic for the whole matrix.
+    can_reduce = True
     for reduce_row in tl.range(0, NUM_ROWS, num_stages=1):
         row_costs = tl.load(cost + reduce_row * NUM_COLUMNS + lane, mask=column_mask, other=float("inf"))
         row_minimum = tl.min(row_costs, axis=0)
-        tl.store(rowmin + reduce_row, tl.where(row_minimum - row_minimum == 0, row_minimum, 0.0))
+        # Padding and forbidden edges must not participate in the finite maximum.
+        row_maximum = tl.max(tl.where(row_costs < float("inf"), row_costs, -float("inf")), axis=0)
+        all_forbidden = row_minimum == float("inf")
+        exact_shift = (row_minimum > 0.0) & (row_maximum <= 2.0 * row_minimum)
+        can_reduce = can_reduce & (all_forbidden | (row_minimum == 0.0) | exact_shift)
+        tl.store(rowmin + reduce_row, tl.where(all_forbidden, 0.0, row_minimum))
     # The search below reads the minima written above.
     tl.debug_barrier()
 
@@ -123,14 +128,14 @@ def _linear_assignment_kernel(
             reduced_cost = (
                 min_value
                 - tl.load(u + search_row)
-                # The parentheses make the reduction happen first, so the subtraction is exact.
+                # Apply the verified shift before adding the path and potential terms.
                 + (
                     tl.load(
                         cost + search_row * NUM_COLUMNS + lane,
                         mask=candidate_mask,
                         other=float("inf"),
                     )
-                    - tl.load(rowmin + search_row)
+                    - tl.load(rowmin + search_row, mask=can_reduce, other=0.0)
                 )
                 - tl.load(v + lane, mask=candidate_mask, other=0.0)
             )
