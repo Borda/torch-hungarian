@@ -104,7 +104,15 @@ RUN_TIMEOUT_SECONDS = 3600
 BENCHMARK_OUTPUT_DIR = Path("test-outputs")
 
 #: Benchmark presets the lane may run; each records validation-off solver time beside the public call.
-BENCHMARK_PRESETS = ("rfdetr", "wide")
+#: The ``readme`` preset is dispatch-only: the label lane runs ``rfdetr`` and ``wide`` and never it.
+BENCHMARK_PRESETS = ("rfdetr", "wide", "readme")
+
+#: Arguments a preset always runs with, placed before the caller's tuning so the caller can still
+#: override them. ``readme`` repeats the README table's protocol: five fresh-process rounds, three
+#: warmup calls and thirty timed repetitions, the same as ``make benchmark-readme``.
+_PRESET_DEFAULT_ARGS: dict[str, tuple[str, ...]] = {
+    "readme": ("--process-rounds", "5", "--warmup", "3", "--repetitions", "30"),
+}
 
 _SEPARATOR = "=" * 80
 
@@ -352,6 +360,7 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
         "triton",
         "--output",
         str(output),
+        *_PRESET_DEFAULT_ARGS.get(preset, ()),
         *extra_args,
     ]
     print(f"{_SEPARATOR}\nRUNNING: {' '.join(command)}\n{_SEPARATOR}")

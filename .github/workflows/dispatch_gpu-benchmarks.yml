@@ -16,11 +16,11 @@ on:
         required: false
         default: "L4"
       preset:
-        description: "Benchmark preset to run"
+        description: "Benchmark preset to run; all means rfdetr and wide, and readme (the README table shapes) runs only when chosen"
         required: false
         default: "all"
         type: choice
-        options: ["all", "rfdetr", "wide"]
+        options: ["all", "rfdetr", "wide", "readme"]
       benchmark_args:
         description: "Extra benchmark arguments, such as --process-rounds 1"
         required: false

@@ -22,7 +22,7 @@ on:
         type: string
         default: "L4"
       preset:
-        description: "Benchmark preset to run: all, rfdetr or wide"
+        description: "Benchmark preset to run: all (rfdetr and wide), rfdetr, wide or readme; readme never runs under all"
         required: false
         type: string
         default: "all"
@@ -161,5 +161,5 @@ jobs:
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.payload.pull_request.number,
-            name: 'gpu-benchmarks',
+            name: 'run-gpu-benchmarks',
           });

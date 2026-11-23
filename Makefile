@@ -1,7 +1,7 @@
 PYTHON ?= python
 BENCHMARK_ARGS ?=
 
-.PHONY: help install install-legacy install-dev install-rfdetr check-rfdetr test test-rfdetr benchmark benchmark-evidence benchmark-rfdetr benchmark-wide validate validate-cpu validate-gpu validate-gpu-multi clean
+.PHONY: help install install-legacy install-dev install-rfdetr check-rfdetr test test-rfdetr benchmark benchmark-evidence benchmark-rfdetr benchmark-wide benchmark-readme validate validate-cpu validate-gpu validate-gpu-multi clean
 
 help:
 	@echo "install      editable pure-source install"
@@ -15,6 +15,7 @@ help:
 	@echo "benchmark-evidence record paired Triton validation, memory, and isolated cold evidence"
 	@echo "benchmark-rfdetr RF-DETR training shapes, with validation-off solver time"
 	@echo "benchmark-wide wide and square shapes, with validation-off solver time"
+	@echo "benchmark-readme the batch-208 shapes of the README performance table, five process rounds"
 	@echo "validate-cpu install-dev and test - runs anywhere"
 	@echo "validate-gpu GPU test and metadata lane - skips cleanly without a CUDA device"
 	@echo "validate-gpu-multi two-GPU compiled Triton acceptance - fails unless two eligible GPUs are visible"
@@ -88,6 +89,10 @@ benchmark-rfdetr:
 
 benchmark-wide:
 	$(MAKE) benchmark BENCHMARK_ARGS="--preset wide --backends scipy,public_cuda,triton --dtypes float32 $(BENCHMARK_ARGS)"
+
+# Keep the rounds, warmup and repetitions in step with _PRESET_DEFAULT_ARGS in .modal/test_runner.py.
+benchmark-readme:
+	$(MAKE) benchmark BENCHMARK_ARGS="--preset readme --backends scipy,public_cuda,triton --dtypes float32 --process-rounds 5 --warmup 3 --repetitions 30 $(BENCHMARK_ARGS)"
 
 validate-cpu: test
 
