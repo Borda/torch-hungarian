@@ -1,7 +1,7 @@
 'use strict';
 
-// Builds the GPU benchmark report that `_modal-dispatch_gpu-benchmarks.yml` writes to the run summary and,
-// for the `run-gpu-benchmarks` label, comments on the pull request. It lives here rather than
+// Builds the GPU benchmark report that `_modal-gpu-benchmarks.yml` writes to the run summary and,
+// for the `gpu-benchmarks` label, comments on the pull request. It lives here rather than
 // inline in the workflow so `gpu-benchmark-report.test.js` can run it without GitHub.
 
 const fs = require('node:fs');

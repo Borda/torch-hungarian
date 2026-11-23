@@ -2,7 +2,7 @@ name: Modal GPU Benchmarks (reusable)
 
 # Runs the benchmark presets on a Modal GPU and reports the results table: to the run summary, and,
 # when the caller was a pull request, also as a pull request comment. The callers are
-# dispatch_gpu-benchmarks.yml (manual dispatch) and trigger-gpu-labels.yml (the `run-gpu-benchmarks` label). A run
+# dispatch_gpu-benchmarks.yml (manual dispatch) and trigger-gpu-labels.yml (the `gpu-benchmarks` label). A run
 # costs real money and needs the Modal credentials, so it never runs on push. The label trigger is
 # deliberately `pull_request` and never `pull_request_target`: GitHub withholds secrets from fork
 # pull requests, so untrusted code cannot reach the Modal credentials even if the label is applied
@@ -123,11 +123,11 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-    # Only the report script is needed. It comes from the commit the benchmark ran, so a
-    # change to the script is exercised by the pull request that makes it.
+    # The parser must match the job names in the running workflow, even when
+    # a manual dispatch benchmarks an older commit. TESTED_SHA still records the workload commit.
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
-        ref: ${{ needs.gpu-benchmarks-resolve.outputs.sha }}
+        ref: ${{ github.workflow_sha }}
         sparse-checkout: .github/scripts
         persist-credentials: false
 
@@ -161,5 +161,5 @@ jobs:
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: context.payload.pull_request.number,
-            name: 'run-gpu-benchmarks',
+            name: 'gpu-benchmarks',
           });

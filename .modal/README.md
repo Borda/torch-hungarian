@@ -31,15 +31,15 @@ The container installs the project with the pinned `develop` and `rfdetr` depend
 
 ## CI use
 
-| Workflow                                           | Trigger                                                                                                            |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `.github/workflows/_modal-gpu-tests.yml`           | reusable; called by the two test workflows below                                                                   |
-| `.github/workflows/_modal-gpu-benchmarks.yml`      | reusable; runs the presets and reports them, called by the two workflows below                                     |
-| `../.github/workflows/dispatch_gpu-tests.yml`      | push to `main`, plus manual dispatch with a GPU and device count                                                   |
-| `.github/workflows/trigger-gpu-labels.yml`         | the `run-gpu-tests` label runs the tests and the `run-gpu-benchmarks` label runs the benchmarks, on a pull request |
-| `../.github/workflows/dispatch_gpu-benchmarks.yml` | manual dispatch with a GPU, preset and arguments                                                                   |
+| Workflow                                        | Trigger                                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/_modal-gpu-tests.yml`        | reusable; called by the two test workflows below                                                           |
+| `.github/workflows/_modal-gpu-benchmarks.yml`   | reusable; runs the presets and reports them, called by the two workflows below                             |
+| `.github/workflows/dispatch_gpu-tests.yml`      | push to `main` and `develop`, plus manual dispatch with a GPU and device count                             |
+| `.github/workflows/trigger-gpu-labels.yml`      | the `gpu-tests` label runs the tests and the `gpu-benchmarks` label runs the benchmarks, on a pull request |
+| `.github/workflows/dispatch_gpu-benchmarks.yml` | manual dispatch with a GPU, preset and arguments                                                           |
 
-Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lanes also need the `run-gpu-tests` and `run-gpu-benchmarks` labels to exist; each is removed again once its run reports back.
+Required repository secrets: `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. The label lanes also need the `gpu-tests` and `gpu-benchmarks` labels to exist; each is removed again once its run reports back.
 
 The benchmark lane runs every preset in parallel, or the one chosen on dispatch, and fails when any case misses exact parity, any case is incomplete, or the public call did not execute the Triton backend. It reports the results table, one row of medians across process rounds per case, and, as limitations, every record that was not measured to the run summary and, for the label, as a pull request comment; the JSONL records are uploaded as `gpu-benchmark-<preset>` artifacts. Every Triton shape runs all four validation modes, because the run fails closed without a complete validation-overhead measurement. The default three process rounds run each of the 126 preset cases in three fresh processes, and every Triton case pays a cold compile in each; pass `--process-rounds 1` on dispatch for a quicker look.
 
