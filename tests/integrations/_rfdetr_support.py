@@ -11,6 +11,7 @@ local to that image's target block.
 from dataclasses import dataclass
 from typing import Literal
 
+import pytest
 import torch
 
 #: Queries per group and number of groups used by RF-DETR training defaults.
@@ -55,6 +56,9 @@ COMPACT_PROBLEMS = {
     # Layers with different query counts cannot share one padded batch either.
     "mixed-query-counts": CompactProblem((RFDETR_GROUP_WIDTH, 200), (3, 9), RFDETR_GROUP_DETR),
 }
+
+#: `COMPACT_PROBLEMS` as parametrize values, each carrying its name as the test id.
+COMPACT_PROBLEM_PARAMS = [pytest.param(problem, id=name) for name, problem in COMPACT_PROBLEMS.items()]
 
 
 def compact_costs(problem: CompactProblem, *, kind: CostKind, seed: int) -> list[torch.Tensor]:

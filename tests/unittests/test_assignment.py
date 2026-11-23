@@ -215,7 +215,14 @@ def test_batch_linear_assignment_cpu_promotes_bfloat16_cost_for_scipy():
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16], ids=["fp32", "fp64", "bf16"])
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(torch.float32, id="fp32"),
+        pytest.param(torch.float64, id="fp64"),
+        pytest.param(torch.bfloat16, id="bf16"),
+    ],
+)
 def test_batch_linear_assignment_cpu_accepts_costs_requiring_grad(dtype):
     """Solve model-derived costs without altering the input's autograd graph."""
     leaf = torch.tensor([[[4.0, 1.0], [2.0, 3.0]]], dtype=dtype, requires_grad=True)
@@ -379,7 +386,14 @@ def test_batch_linear_assignment_solves_other_accelerators_on_host(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is not available")
-@pytest.mark.parametrize("shape", [(2, 4, 4), (1, 6, 3), (1, 3, 6)], ids=["square", "tall", "wide"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((2, 4, 4), id="square"),
+        pytest.param((1, 6, 3), id="tall"),
+        pytest.param((1, 3, 6), id="wide"),
+    ],
+)
 def test_batch_linear_assignment_solves_mps_costs_on_host(shape):
     """Return SciPy's assignment on the MPS device for square, tall and wide costs."""
     cost = torch.rand(shape, generator=torch.Generator().manual_seed(11))
@@ -444,8 +458,15 @@ def scipy_indices(cost):
 
 @pytest.mark.parametrize(
     "shape",
-    [(3, 4, 4), (2, 6, 3), (2, 3, 6), (1, 1, 5), (4, 5, 1), (2, 40, 7), (2, 7, 40)],
-    ids=["square", "tall", "wide", "one-worker", "one-task", "very-tall", "very-wide"],
+    [
+        pytest.param((3, 4, 4), id="square"),
+        pytest.param((2, 6, 3), id="tall"),
+        pytest.param((2, 3, 6), id="wide"),
+        pytest.param((1, 1, 5), id="one-worker"),
+        pytest.param((4, 5, 1), id="one-task"),
+        pytest.param((2, 40, 7), id="very-tall"),
+        pytest.param((2, 7, 40), id="very-wide"),
+    ],
 )
 def test_batch_linear_assignment_indices_match_scipy_pairs(shape):
     """Return SciPy's row-sorted pairs, of static shape (B, min(W, T)), for every orientation."""
@@ -473,8 +494,12 @@ def test_batch_linear_assignment_indices_agree_with_the_assignment():
 
 @pytest.mark.parametrize(
     ("shape", "expected"),
-    [((0, 4, 3), (0, 3)), ((2, 0, 3), (2, 0)), ((2, 4, 0), (2, 0)), ((0, 0, 0), (0, 0))],
-    ids=["no-batch", "no-workers", "no-tasks", "all-empty"],
+    [
+        pytest.param((0, 4, 3), (0, 3), id="no-batch"),
+        pytest.param((2, 0, 3), (2, 0), id="no-workers"),
+        pytest.param((2, 4, 0), (2, 0), id="no-tasks"),
+        pytest.param((0, 0, 0), (0, 0), id="all-empty"),
+    ],
 )
 def test_batch_linear_assignment_indices_keep_the_static_shape_for_empty_costs(shape, expected):
     """Return empty pairs whose shape is still (B, min(W, T))."""

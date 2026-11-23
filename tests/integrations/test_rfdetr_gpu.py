@@ -17,7 +17,7 @@ import torch
 
 from tests._triton_eligibility import compiled_device_params
 from tests.integrations._rfdetr_support import (
-    COMPACT_PROBLEMS,
+    COMPACT_PROBLEM_PARAMS,
     COST_KINDS,
     RFDETR_GROUP_DETR,
     RFDETR_GROUP_WIDTH,
@@ -67,7 +67,7 @@ def triton_device(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.parametrize("kind", COST_KINDS)
-@pytest.mark.parametrize("problem", list(COMPACT_PROBLEMS.values()), ids=list(COMPACT_PROBLEMS))
+@pytest.mark.parametrize("problem", COMPACT_PROBLEM_PARAMS)
 def test_batched_kernel_solve_matches_the_scipy_oracle(
     problem: CompactProblem, kind: CostKind, triton_device: tuple[torch.device, list[Any]]
 ) -> None:

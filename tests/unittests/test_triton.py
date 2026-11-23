@@ -614,8 +614,14 @@ def _scipy_indices(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 @pytest.mark.parametrize(
     "shape",
-    [(5, 40, 40), (5, 300, 7), (5, 7, 300), (6, 300, 30), (5, 1, 9), (5, 9, 1)],
-    ids=["square", "tall", "wide", "matcher-shape", "one-worker", "one-task"],
+    [
+        pytest.param((5, 40, 40), id="square"),
+        pytest.param((5, 300, 7), id="tall"),
+        pytest.param((5, 7, 300), id="wide"),
+        pytest.param((6, 300, 30), id="matcher-shape"),
+        pytest.param((5, 1, 9), id="one-worker"),
+        pytest.param((5, 9, 1), id="one-task"),
+    ],
 )
 @pytest.mark.parametrize("validation", ["full", "off"])
 def test_batch_linear_assignment_indices_compiled_match_scipy_pairs(
@@ -655,8 +661,11 @@ def test_batch_linear_assignment_indices_compiled_match_scipy_for_promoted_dtype
 
 @pytest.mark.parametrize(
     ("shape", "expected"),
-    [((0, 4, 3), (0, 3)), ((2, 0, 3), (2, 0)), ((2, 4, 0), (2, 0))],
-    ids=["no-batch", "no-workers", "no-tasks"],
+    [
+        pytest.param((0, 4, 3), (0, 3), id="no-batch"),
+        pytest.param((2, 0, 3), (2, 0), id="no-workers"),
+        pytest.param((2, 4, 0), (2, 0), id="no-tasks"),
+    ],
 )
 def test_batch_linear_assignment_indices_compiled_keep_the_static_shape_for_empty_costs(
     triton_backend_device: tuple[object, torch.device], shape: tuple[int, int, int], expected: tuple[int, int]

@@ -18,6 +18,7 @@ import torch
 
 import torch_linear_assignment
 from tests.integrations._rfdetr_support import (
+    COMPACT_PROBLEM_PARAMS,
     COMPACT_PROBLEMS,
     RFDETR_GROUP_DETR,
     RFDETR_GROUP_WIDTH,
@@ -63,7 +64,7 @@ def test_float64_cost_preserves_a_small_assignment_difference() -> None:
     assert actual[1].tolist() == [1, 0]
 
 
-@pytest.mark.parametrize("problem", list(COMPACT_PROBLEMS.values()), ids=list(COMPACT_PROBLEMS))
+@pytest.mark.parametrize("problem", COMPACT_PROBLEM_PARAMS)
 def test_batched_solve_returns_the_scipy_oracle_pairs(problem: CompactProblem) -> None:
     """Continuous costs have one optimum, so the batched solve must return the oracle's exact pairs."""
     costs = compact_costs(problem, kind="continuous", seed=1)
@@ -78,7 +79,7 @@ def test_batched_solve_returns_the_scipy_oracle_pairs(problem: CompactProblem) -
 
 
 @pytest.mark.parametrize("kind", ["tied", "constant"])
-@pytest.mark.parametrize("problem", list(COMPACT_PROBLEMS.values()), ids=list(COMPACT_PROBLEMS))
+@pytest.mark.parametrize("problem", COMPACT_PROBLEM_PARAMS)
 def test_batched_solve_is_optimal_on_tied_costs(problem: CompactProblem, kind: CostKind) -> None:
     """Tied costs admit many optima, and padding can change SciPy's tie-break, so compare objectives."""
     costs = compact_costs(problem, kind=kind, seed=2)
