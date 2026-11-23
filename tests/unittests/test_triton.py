@@ -707,32 +707,32 @@ def test_batch_linear_assignment_indices_compiled_disable_cuda_autocast(
     assert torch.equal(cols.cpu(), expected_cols)
 
 
-def test_public_indices_replay_in_a_cuda_graph_with_validation_off() -> None:
+def test_public_indices_replay_in_a_cuda_graph_with_validation_off(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
     """Capture the unchecked solve once after warm-up and replay it on new costs with exact pairs."""
-    reason = compiled_triton_skip_reason()
-    if reason is not None:
-        pytest.skip(reason)
-
+    _, device = triton_backend_device
     shape = (13, 300, 7)
     generator = torch.Generator().manual_seed(21)
-    static_cost = torch.rand(shape, generator=generator).cuda()
-    # Compilation and workspace allocation happen on a side stream before capture.
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        batch_linear_assignment_indices(static_cost, validate="off")
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        rows, cols = batch_linear_assignment_indices(static_cost, validate="off")
+    with torch.cuda.device(device):
+        static_cost = torch.rand(shape, generator=generator).to(device)
+        # Compilation and workspace allocation happen on a side stream before capture.
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            batch_linear_assignment_indices(static_cost, validate="off")
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            rows, cols = batch_linear_assignment_indices(static_cost, validate="off")
 
-    for _ in range(3):
-        fresh = torch.rand(shape, generator=generator)
-        static_cost.copy_(fresh)
-        graph.replay()
-        expected_rows, expected_cols = _scipy_indices(fresh)
-        assert torch.equal(rows.cpu(), expected_rows)
-        assert torch.equal(cols.cpu(), expected_cols)
+        for _ in range(3):
+            fresh = torch.rand(shape, generator=generator)
+            static_cost.copy_(fresh)
+            graph.replay()
+            expected_rows, expected_cols = _scipy_indices(fresh)
+            assert torch.equal(rows.cpu(), expected_rows)
+            assert torch.equal(cols.cpu(), expected_cols)
 
 
 @pytest.mark.parametrize(
@@ -745,14 +745,13 @@ def test_public_indices_replay_in_a_cuda_graph_with_validation_off() -> None:
     ],
 )
 def test_public_calls_route_small_batches_to_scipy(
-    monkeypatch: pytest.MonkeyPatch, shape: tuple[int, int, int], launches: int
+    triton_backend_device: tuple[object, torch.device],
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, int, int],
+    launches: int,
 ) -> None:
     """Launch the kernel only for batches the routing rule leaves on the GPU, with SciPy's answer either way."""
-    reason = compiled_triton_skip_reason()
-    if reason is not None:
-        pytest.skip(reason)
-
-    backend = importlib.import_module("torch_linear_assignment._triton")
+    backend, device = triton_backend_device
     launched: list[tuple[int, ...]] = []
     original_solve = backend._solve
 
@@ -763,8 +762,10 @@ def test_public_calls_route_small_batches_to_scipy(
     monkeypatch.setattr(backend, "_solve", recording_solve)
     host_cost = torch.rand(shape, generator=torch.Generator().manual_seed(sum(shape)))
 
-    assignment = batch_linear_assignment(host_cost.cuda())
-    rows, cols = batch_linear_assignment_indices(host_cost.cuda())
+    cost = host_cost.to(device)
+    with torch.cuda.device(device):
+        assignment = batch_linear_assignment(cost)
+        rows, cols = batch_linear_assignment_indices(cost)
 
     assert len(launched) == 2 * launches
     assert torch.equal(assignment.cpu(), _scipy_assignment(host_cost))

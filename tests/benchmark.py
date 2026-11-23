@@ -352,12 +352,16 @@ def _device_metadata(device: torch.device) -> dict[str, str]:
     }
 
 
-def _backend_implementation(backend: str, _device: torch.device) -> str:
-    """Name the implementation observed after the measured public call."""
+def _backend_implementation(backend: str, cost: torch.Tensor) -> str:
+    """Name the public route for the measured cost after the call loads its backend."""
     if backend != "public_cuda":
         return backend
 
     if "torch_linear_assignment._triton" in sys.modules:
+        # Older releases have no shape-dependent dispatch and are still benchmarked by this script.
+        uses_triton = getattr(sys.modules.get("torch_linear_assignment.assignment"), "_uses_triton", None)
+        if uses_triton is not None and not uses_triton(cost):
+            return "scipy_fallback"
         return "triton"
     if "torch_linear_assignment._backend" in sys.modules:
         return "legacy_cuda"
@@ -1130,7 +1134,7 @@ def _case_record(
         },
     }
     if operation is None:
-        implementation = _backend_implementation(backend, benchmark_cost.device)
+        implementation = _backend_implementation(backend, benchmark_cost)
         return {
             **base,
             "implementation": implementation,
@@ -1142,7 +1146,7 @@ def _case_record(
     cold_memory = _start_memory_boundary(benchmark_cost)
     cold_ms, result = _time_call(operation, benchmark_cost)
     cold_memory = _finish_memory_boundary(benchmark_cost, cold_memory)
-    implementation = _backend_implementation(backend, benchmark_cost.device)
+    implementation = _backend_implementation(backend, benchmark_cost)
     base["implementation"] = implementation
     base["implementation_source"] = _implementation_metadata(implementation)
     if implementation == "triton":

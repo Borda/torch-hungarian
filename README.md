@@ -73,7 +73,7 @@ tensor([[0, 1, 3]])
 tensor([[0, 2, 1]])
 ```
 
-`batch_linear_assignment_indices(cost)` returns the same `(row_ind, col_ind)` pair in one call. Both tensors are `torch.long`, live on the input's device, and have the fixed shape `(B, min(W, T))`, so the Triton path needs no host read after the solve:
+The development version adds `batch_linear_assignment_indices(cost)`. Run the examples below after installing the current checkout with `python -m pip install .` from the repository root. Both tensors in the returned `(row_ind, col_ind)` pair are `torch.long`, live on the input's device, and have the fixed shape `(B, min(W, T))`. On Triton, building those pairs from the solver output adds no host reads.
 
 ```python
 from torch_linear_assignment import batch_linear_assignment_indices
@@ -81,17 +81,27 @@ from torch_linear_assignment import batch_linear_assignment_indices
 row_ind, col_ind = batch_linear_assignment_indices(cost)
 ```
 
-By default (`validate="full"`) it checks for NaN, `-inf` and an infeasible matrix, which costs two host reads. `validate="off"` skips both, so the call can be captured in a CUDA graph. Run it once first so the kernel compiles and the workspaces exist, then capture and replay. A NaN, `-inf` or infeasible cost is unchecked under `"off"` and returns unspecified indices. SciPy-backed calls always validate:
+On the Triton path, `validate="full"` reads back to the host to check floating-point costs for NaN and `-inf` before launch and to check infeasibility after a solve. Integer costs skip the first read, and empty inputs skip the solve. With `validate="off"`, those checks are skipped and invalid or infeasible costs return unspecified indices. SciPy-backed calls always validate.
+
+CUDA graph capture requires an eligible GPU and an input shape that [routes to Triton](#support). CUDA calls routed to SciPy transfer the cost to the host and cannot be captured. Warm up on a side stream before capturing and replaying:
 
 ```python
-static_cost = torch.rand(208, 300, 12, device="cuda")
-batch_linear_assignment_indices(static_cost, validate="off")  # warm-up: compile and allocate
+import torch
+from torch_linear_assignment import batch_linear_assignment_indices
+
+static_cost = torch.rand(13, 300, 7, device="cuda")
+warmup = torch.cuda.Stream()
+warmup.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(warmup):
+    batch_linear_assignment_indices(static_cost, validate="off")
+torch.cuda.current_stream().wait_stream(warmup)
 
 graph = torch.cuda.CUDAGraph()
-with torch.cuda.graph(graph):
+with torch.cuda.graph(graph, stream=warmup):
     rows, cols = batch_linear_assignment_indices(static_cost, validate="off")
 
-static_cost.copy_(next_cost)  # same shape and dtype as the captured input
+next_cost = torch.rand_like(static_cost)
+static_cost.copy_(next_cost)
 graph.replay()  # rows and cols now hold the pairs for next_cost
 ```
 

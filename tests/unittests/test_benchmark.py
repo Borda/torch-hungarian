@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 import torch
 
+import torch_linear_assignment.assignment as assignment_module
+
 
 def _load_benchmark_module(module_name: str = "torch_linear_assignment_benchmark") -> ModuleType:
     """Load the standalone benchmark script by path; it is a CLI, not an importable test module."""
@@ -168,13 +170,14 @@ def test_public_cuda_implementation_identifies_the_executed_backend(
     loaded_module: str | None,
     expected: str,
 ) -> None:
-    """Prevent a discoverable module from standing in for the backend actually loaded."""
+    """Classify releases that identify their GPU implementation by loaded module."""
+    monkeypatch.delattr(assignment_module, "_uses_triton")
     monkeypatch.delitem(sys.modules, "torch_linear_assignment._triton", raising=False)
     monkeypatch.delitem(sys.modules, "torch_linear_assignment._backend", raising=False)
     if loaded_module is not None:
         monkeypatch.setitem(sys.modules, loaded_module, ModuleType(loaded_module))
 
-    assert benchmark._backend_implementation("public_cuda", torch.device("cuda:0")) == expected
+    assert benchmark._backend_implementation("public_cuda", torch.empty((1, 2, 2))) == expected
 
 
 def test_discoverable_triton_module_does_not_mislabel_scipy_fallback(
@@ -185,7 +188,24 @@ def test_discoverable_triton_module_does_not_mislabel_scipy_fallback(
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (8, 0))
     monkeypatch.delitem(sys.modules, "torch_linear_assignment._triton", raising=False)
 
-    assert benchmark._backend_implementation("public_cuda", torch.device("cuda:0")) == "scipy_fallback"
+    assert benchmark._backend_implementation("public_cuda", torch.empty((1, 2, 2))) == "scipy_fallback"
+
+
+@pytest.mark.parametrize(
+    ("batch", "expected"),
+    [
+        pytest.param(1, "scipy_fallback", id="host-routed"),
+        pytest.param(16, "triton", id="triton-routed"),
+    ],
+)
+def test_public_cuda_attribution_follows_shape_dispatch(monkeypatch, batch, expected):
+    """Distinguish host routing from kernel execution even when Triton is loaded."""
+    monkeypatch.setattr(assignment_module, "_cuda_uses_triton", lambda _cost: True)
+    module = ModuleType("torch_linear_assignment._triton")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    cost = SimpleNamespace(is_cuda=True, shape=(batch, 300, 300), device=torch.device("cuda:0"))
+
+    assert benchmark._backend_implementation("public_cuda", cost) == expected
 
 
 def test_loaded_implementation_metadata_hashes_the_executed_module(tmp_path: Path) -> None:

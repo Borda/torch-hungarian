@@ -16,7 +16,7 @@ _TRITON_MINIMUM_TORCH_VERSION = (2, 4)
 
 #: How much of the Triton solve's input checking ``batch_linear_assignment_indices`` performs.
 ValidateMode = Literal["full", "off"]
-_VALIDATE_MODES: frozenset[str] = frozenset({"full", "off"})
+_VALIDATE_MODES = ("full", "off")
 
 
 def _prepare_solver_cost(cost: torch.Tensor) -> torch.Tensor:
@@ -183,25 +183,26 @@ def batch_linear_assignment_indices(
     The pairs follow SciPy's ``linear_sum_assignment``: ``rows`` is sorted within each problem and
     ``cols[b, i]`` is the task assigned to worker ``rows[b, i]``. Both tensors are ``torch.long``,
     live on the input's device, and have shape ``(B, min(W, T))``, so no output size depends on the
-    data. Unlike ``batch_linear_assignment`` followed by ``assignment_to_indices``, the Triton path
-    needs no host read after the solve.
+    data. On the Triton path, converting the solver's maps to pairs adds no host reads.
 
     Args:
       cost: Cost matrix with shape (B, W, T), where W is the number of workers
             and T is the number of tasks.
-      validate: ``"full"`` checks for invalid numeric entries and an infeasible matrix, which costs
-            two host reads per call. ``"off"`` skips both reads, so the call can be captured in a
-            CUDA graph after one warm-up call, but a NaN, ``-inf`` or infeasible cost is then
-            unchecked and returns unspecified indices. It affects only the Triton path; SciPy
-            always validates.
+      validate: On the Triton path, ``"full"`` checks floating-point input for NaN and ``-inf``
+            before launch and checks for infeasibility after a solve. Each check reads back to
+            the host. Integer inputs skip the first check, and empty inputs skip the solve.
+            ``"off"`` skips both checks and permits CUDA graph capture after warm-up when the
+            input routes to Triton. Invalid numeric entries or infeasible costs then produce
+            unspecified indices. SciPy-backed calls always validate, and CUDA calls routed
+            to SciPy require a host transfer.
 
     Returns:
       The pair ``(rows, cols)``, each with shape (B, min(W, T)).
 
     Raises:
       TypeError: If costs have a complex dtype.
-      ValueError: If ``validate`` is unknown, or, under ``"full"``, if costs have the wrong rank,
-        invalid numeric entries, or no feasible matching.
+      ValueError: If ``validate`` is unknown or costs have the wrong rank. On checked paths, also
+        raised for invalid numeric entries or an infeasible matching.
 
     Examples:
       >>> cost = torch.tensor([[[4.0, 1.0, 3.0], [2.0, 0.0, 5.0], [3.0, 2.0, 2.0]]])
@@ -209,7 +210,7 @@ def batch_linear_assignment_indices(
       >>> rows.tolist(), cols.tolist()
       ([[0, 1, 2]], [[1, 0, 2]])
     """
-    if validate not in _VALIDATE_MODES:
+    if not isinstance(validate, str) or validate not in _VALIDATE_MODES:
         raise ValueError(f"Unknown validate mode: {validate!r}.")
     _check_cost(cost)
     if _uses_triton(cost):
@@ -219,8 +220,8 @@ def batch_linear_assignment_indices(
     batch_size, workers, tasks = cost.shape
     assignment = _solve_on_host(cost)
     if batch_size == 0 or workers == 0 or tasks == 0:
-        rows = torch.zeros((batch_size, min(workers, tasks)), dtype=torch.long)
-        return rows.to(cost.device), rows.clone().to(cost.device)
+        rows = torch.zeros((batch_size, min(workers, tasks)), dtype=torch.long, device=cost.device)
+        return rows, rows.clone()
     rows, cols = assignment_to_indices(assignment)
     return rows.to(cost.device), cols.to(cost.device)
 

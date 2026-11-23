@@ -484,6 +484,19 @@ def test_batch_linear_assignment_indices_keep_the_static_shape_for_empty_costs(s
     assert rows.dtype == cols.dtype == torch.long
 
 
+@pytest.mark.parametrize("default_device", ["cpu", "meta"])
+def test_empty_indices_use_the_input_device(default_device):
+    """Return CPU pairs for an explicit CPU cost under a different default device."""
+    cost = torch.empty((0, 4, 3), device="cpu")
+
+    with torch.device(default_device):
+        rows, cols = batch_linear_assignment_indices(cost)
+
+    assert rows.device == cols.device == cost.device
+    assert rows.shape == cols.shape == (0, 3)
+    assert rows.dtype == cols.dtype == torch.long
+
+
 @pytest.mark.parametrize("validate", ["full", "off"])
 def test_batch_linear_assignment_indices_accept_both_validate_modes_on_the_host(validate):
     """Give the same pairs under either mode, since SciPy validates on every host path."""
@@ -524,10 +537,25 @@ def test_batch_linear_assignment_indices_raise_the_assignment_errors(cost, error
         batch_linear_assignment_indices(cost)
 
 
-def test_batch_linear_assignment_indices_reject_an_unknown_validate_mode():
+class _UnhashableMode(str):
+    """A string value whose type does not support hashing."""
+
+    __hash__ = None
+
+
+@pytest.mark.parametrize(
+    "validate",
+    [
+        "deferred",
+        pytest.param([], id="list"),
+        pytest.param({}, id="dict"),
+        pytest.param(_UnhashableMode("deferred"), id="unhashable-string"),
+    ],
+)
+def test_batch_linear_assignment_indices_reject_an_unknown_validate_mode(validate):
     """Name the bad mode instead of treating it as one of the two."""
-    with pytest.raises(ValueError, match="Unknown validate mode: 'deferred'"):
-        batch_linear_assignment_indices(torch.zeros(1, 2, 2), validate="deferred")
+    with pytest.raises(ValueError, match="Unknown validate mode:"):
+        batch_linear_assignment_indices(torch.zeros(1, 2, 2), validate=validate)
 
 
 def test_batch_linear_assignment_indices_solve_other_accelerators_on_host(monkeypatch):
