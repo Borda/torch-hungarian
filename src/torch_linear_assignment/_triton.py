@@ -213,8 +213,8 @@ def _linear_assignment_kernel(
         tl.store(u + current_row, current_potential + min_value, mask=solved)
         visited_rows = scanned_rows
         update_row = solved & row_mask & visited_rows & (lane != current_row)
-        # Load only the rows that are updated. The scalar store to `u + current_row` above runs on
-        # every thread, so another warp's vector load of that row would race with it.
+        # Load only the rows that are updated. Otherwise a vector load of `current_row` could race
+        # with the scalar store above, which is not synchronized with loads in other warps.
         tl.store(
             u + lane,
             tl.load(u + lane, mask=update_row, other=0.0) + min_value - scanned_row_costs,
