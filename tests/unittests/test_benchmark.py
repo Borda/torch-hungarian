@@ -833,6 +833,31 @@ def test_process_statistics_require_every_fresh_process_round() -> None:
     assert records[0]["cold_compilation"]["cache_policy"] == "empty_unique_triton_cache"
 
 
+def test_process_statistics_keep_the_populated_cache_policy_of_their_workers() -> None:
+    """Prevent cached-start evidence from being labelled as an empty-cache measurement."""
+    records = [
+        {
+            "backend": "triton",
+            "implementation": "triton",
+            "status": "measured",
+            "process_round": process_round,
+            "process_isolated": True,
+            "validation_mode": "full",
+            "shape": {"batch": 1, "workers": 2, "tasks": 2},
+            "input_dtype": "float32",
+            "seed": 320,
+            "input_sha256": "same-input",
+            "timing": {"cold_first_call_ms": 20.0, "warm_ms": {"median": 1.0, "p95": 1.0, "samples": [1.0]}},
+            "cold_compilation": {"cache_policy": "populated_triton_cache"},
+        }
+        for process_round in range(2)
+    ]
+
+    benchmark._attach_process_statistics(records, required_rounds=2)
+
+    assert records[0]["cold_compilation"]["cache_policy"] == "populated_triton_cache"
+
+
 def test_process_statistics_do_not_claim_triton_cache_isolation_for_scipy() -> None:
     """Prevent CPU cold rows from inheriting Triton-specific cache claims."""
     record = {

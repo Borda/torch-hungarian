@@ -982,7 +982,11 @@ def _attach_process_statistics(records: list[dict[str, Any]], required_rounds: i
             "p95_ms": _nearest_rank_p95(cold_samples),
             "quantile": "nearest_rank",
             "fresh_process": isolated,
-            "cache_policy": ("empty_unique_triton_cache" if implementation == "triton" else "not_applicable"),
+            "cache_policy": (
+                group[0].get("cold_compilation", {}).get("cache_policy") or "empty_unique_triton_cache"
+                if implementation == "triton"
+                else "not_applicable"
+            ),
         }
         for record in group:
             record["process_statistics"] = process_statistics
