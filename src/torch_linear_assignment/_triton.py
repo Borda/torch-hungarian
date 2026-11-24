@@ -82,22 +82,8 @@ def _linear_assignment_kernel(
     row4col = row4col + batch_index * NUM_COLUMNS
     rowmin = rowmin + batch_index * NUM_ROWS
 
-    # Every solver row is assigned once. Sterbenz's lemma guarantees exact subtraction
-    # when positive finite costs are within a factor of two of their row minimum.
-    # If any row is unsafe, keep the original search arithmetic for the whole matrix.
-    can_reduce = True
-    for reduce_row in tl.range(0, NUM_ROWS, num_stages=1):
-        row_costs = tl.load(cost + reduce_row * NUM_COLUMNS + lane, mask=column_mask, other=float("inf"))
-        row_minimum = tl.min(row_costs, axis=0)
-        # Padding and forbidden edges must not participate in the finite maximum.
-        row_maximum = tl.max(tl.where(row_costs < float("inf"), row_costs, -float("inf")), axis=0)
-        all_forbidden = row_minimum == float("inf")
-        exact_shift = (row_minimum > 0.0) & (row_maximum <= 2.0 * row_minimum)
-        can_reduce = can_reduce & (all_forbidden | (row_minimum == 0.0) | exact_shift)
-        tl.store(rowmin + reduce_row, tl.where(all_forbidden, 0.0, row_minimum))
-    # The search below reads the minima written above.
-    tl.debug_barrier()
-
+    # EXPERIMENT: the row-minimum pre-pass is removed to measure its cost; this variant is not parity-safe
+    # for float32 offsets.
     for current_row in tl.range(0, NUM_ROWS, num_stages=1):
         scanned_rows = tl.zeros((BLOCK_N,), tl.int1)
         scanned_columns = tl.zeros((BLOCK_N,), tl.int1)
@@ -128,14 +114,10 @@ def _linear_assignment_kernel(
             reduced_cost = (
                 min_value
                 - tl.load(u + search_row)
-                # Apply the verified shift before adding the path and potential terms.
-                + (
-                    tl.load(
-                        cost + search_row * NUM_COLUMNS + lane,
-                        mask=candidate_mask,
-                        other=float("inf"),
-                    )
-                    - tl.load(rowmin + search_row, mask=can_reduce, other=0.0)
+                + tl.load(
+                    cost + search_row * NUM_COLUMNS + lane,
+                    mask=candidate_mask,
+                    other=float("inf"),
                 )
                 - tl.load(v + lane, mask=candidate_mask, other=0.0)
             )
