@@ -19,6 +19,14 @@ jobs:
       with:
         python-version: "3.12"
 
+    # PyPI renders the README with no repository around it, so make its relative paths absolute,
+    # pinned to the commit being built. A missing path fails the build instead of shipping a broken link.
+    - name: Make README relative paths absolute
+      env:
+        REPO: ${{ github.repository }}
+        REF: ${{ github.sha }}
+      run: python .github/scripts/readme_absolute_urls.py README.md --repo "$REPO" --ref "$REF"
+
     - name: Build and verify distributions
       run: |
         python -m pip install "build==1.5.0" "setuptools==80.9.0" "twine==6.2.0"
