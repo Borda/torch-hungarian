@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 450" width="940" height="450" role="img" aria-labelledby="t d">
+<title id="t">How linear assignment is solved, step by step</title>
+<desc id="d">Animation of the shortest augmenting path method on a 3 by 3 cost matrix. Each worker in turn reads its row, picks its cheapest cost, and if that task is locked by another worker, prices are raised along an alternating path until a free task becomes tight. The final matching has total cost 11 and the prices certify that it is optimal.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#58C4DD"/></marker></defs>
+<style>
+  .bg { fill: #101216; stroke: #2b2f36; stroke-width: 1.5; }
+  text { font-family: "STIX Two Text", "Latin Modern Roman", Cambria, Georgia, "Times New Roman", serif; fill: #ece6e2; }
+  .muted { fill: #9aa0aa; }
+  .title { font-size: 21px; font-weight: 600; }
+  .sub { font-size: 14px; }
+  .cap { font-size: 15.5px; }
+  .capb { font-size: 17px; font-weight: 600; }
+  .num { font-size: 21px; text-anchor: middle; dominant-baseline: central; }
+  .var { font-size: 17px; font-style: italic; text-anchor: middle; dominant-baseline: central; }
+  .hdr { font-size: 14px; text-anchor: middle; fill: #9aa0aa; }
+  .rowhdr { font-size: 14px; text-anchor: end; fill: #9aa0aa; }
+  .cell { fill: #181b20; stroke: #2b2f36; stroke-width: 1.2; }
+  .blue { fill: #58C4DD; } .teal { fill: #5CD0B3; } .green { fill: #83C167; } .yellow { fill: #F7D96F; }
+  .gold { fill: #F0AC5F; } .red { fill: #FC6255; }
+
+  @keyframes kw0 { 0%, 0.00% { opacity: 0 } 0.90%, 45.00% { opacity: 1 } 45.90%, 100% { opacity: 0 } }
+  .w0 { opacity: 0; animation: kw0 28.0s ease-in-out infinite; }
+  @keyframes kw1 { 0%, 45.00% { opacity: 0 } 45.90%, 76.43% { opacity: 1 } 77.33%, 100% { opacity: 0 } }
+  .w1 { opacity: 0; animation: kw1 28.0s ease-in-out infinite; }
+  @keyframes ka2 { 0%, 76.43% { opacity: 0 } 77.63%, 95% { opacity: 1 } 99%, 100% { opacity: 0 } }
+  .a2 { opacity: 0; animation: ka2 28.0s ease-in-out infinite; }
+  @keyframes kw3 { 0%, 0.00% { opacity: 0 } 0.90%, 76.43% { opacity: 1 } 77.33%, 100% { opacity: 0 } }
+  .w3 { opacity: 0; animation: kw3 28.0s ease-in-out infinite; }
+  @keyframes kw4 { 0%, 0.00% { opacity: 0 } 0.90%, 16.43% { opacity: 1 } 17.33%, 100% { opacity: 0 } }
+  .w4 { opacity: 0; animation: kw4 28.0s ease-in-out infinite; }
+  @keyframes kw5 { 0%, 16.43% { opacity: 0 } 17.33%, 45.00% { opacity: 1 } 45.90%, 100% { opacity: 0 } }
+  .w5 { opacity: 0; animation: kw5 28.0s ease-in-out infinite; }
+  @keyframes kw6 { 0%, 0.00% { opacity: 0 } 0.90%, 7.14% { opacity: 1 } 8.04%, 100% { opacity: 0 } }
+  .w6 { opacity: 0; animation: kw6 28.0s ease-in-out infinite; }
+  @keyframes kw7 { 0%, 7.14% { opacity: 0 } 8.04%, 9.11% { opacity: 1 } 10.01%, 100% { opacity: 0 } }
+  .w7 { opacity: 0; animation: kw7 28.0s ease-in-out infinite; }
+  @keyframes kw8 { 0%, 9.11% { opacity: 0 } 10.01%, 11.07% { opacity: 1 } 11.97%, 100% { opacity: 0 } }
+  .w8 { opacity: 0; animation: kw8 28.0s ease-in-out infinite; }
+  @keyframes kw9 { 0%, 11.07% { opacity: 0 } 11.97%, 13.04% { opacity: 1 } 13.94%, 100% { opacity: 0 } }
+  .w9 { opacity: 0; animation: kw9 28.0s ease-in-out infinite; }
+  @keyframes kw10 { 0%, 7.14% { opacity: 0 } 8.04%, 13.93% { opacity: 1 } 14.83%, 100% { opacity: 0 } }
+  .w10 { opacity: 0; animation: kw10 28.0s ease-in-out infinite; }
+  @keyframes kw11 { 0%, 13.93% { opacity: 0 } 14.83%, 23.57% { opacity: 1 } 24.47%, 100% { opacity: 0 } }
+  .w11 { opacity: 0; animation: kw11 28.0s ease-in-out infinite; }
+  @keyframes kw12 { 0%, 13.93% { opacity: 0 } 14.83%, 18.57% { opacity: 1 } 19.47%, 100% { opacity: 0 } }
+  .w12 { opacity: 0; animation: kw12 28.0s ease-in-out infinite; }
+  @keyframes kw13 { 0%, 18.57% { opacity: 0 } 19.47%, 23.57% { opacity: 1 } 24.47%, 100% { opacity: 0 } }
+  .w13 { opacity: 0; animation: kw13 28.0s ease-in-out infinite; }
+  @keyframes kw14 { 0%, 23.57% { opacity: 0 } 24.47%, 50.71% { opacity: 1 } 51.61%, 100% { opacity: 0 } }
+  .w14 { opacity: 0; animation: kw14 28.0s ease-in-out infinite; }
+  @keyframes kw15 { 0%, 23.57% { opacity: 0 } 24.47%, 28.57% { opacity: 1 } 29.47%, 100% { opacity: 0 } }
+  .w15 { opacity: 0; animation: kw15 28.0s ease-in-out infinite; }
+  @keyframes kw16 { 0%, 28.57% { opacity: 0 } 29.47%, 30.54% { opacity: 1 } 31.44%, 100% { opacity: 0 } }
+  .w16 { opacity: 0; animation: kw16 28.0s ease-in-out infinite; }
+  @keyframes kw17 { 0%, 30.54% { opacity: 0 } 31.44%, 32.50% { opacity: 1 } 33.40%, 100% { opacity: 0 } }
+  .w17 { opacity: 0; animation: kw17 28.0s ease-in-out infinite; }
+  @keyframes kw18 { 0%, 32.50% { opacity: 0 } 33.40%, 34.46% { opacity: 1 } 35.36%, 100% { opacity: 0 } }
+  .w18 { opacity: 0; animation: kw18 28.0s ease-in-out infinite; }
+  @keyframes kw19 { 0%, 28.57% { opacity: 0 } 29.47%, 35.00% { opacity: 1 } 35.90%, 100% { opacity: 0 } }
+  .w19 { opacity: 0; animation: kw19 28.0s ease-in-out infinite; }
+  @keyframes kw20 { 0%, 35.00% { opacity: 0 } 35.90%, 40.00% { opacity: 1 } 40.90%, 100% { opacity: 0 } }
+  .w20 { opacity: 0; animation: kw20 28.0s ease-in-out infinite; }
+  @keyframes kw21 { 0%, 40.00% { opacity: 0 } 40.90%, 50.71% { opacity: 1 } 51.61%, 100% { opacity: 0 } }
+  .w21 { opacity: 0; animation: kw21 28.0s ease-in-out infinite; }
+  @keyframes kw22 { 0%, 40.00% { opacity: 0 } 40.90%, 45.00% { opacity: 1 } 45.90%, 100% { opacity: 0 } }
+  .w22 { opacity: 0; animation: kw22 28.0s ease-in-out infinite; }
+  @keyframes kw23 { 0%, 45.00% { opacity: 0 } 45.90%, 50.71% { opacity: 1 } 51.61%, 100% { opacity: 0 } }
+  .w23 { opacity: 0; animation: kw23 28.0s ease-in-out infinite; }
+  @keyframes ka24 { 0%, 50.71% { opacity: 0 } 51.91%, 95% { opacity: 1 } 99%, 100% { opacity: 0 } }
+  .a24 { opacity: 0; animation: ka24 28.0s ease-in-out infinite; }
+  @keyframes kw25 { 0%, 50.71% { opacity: 0 } 51.61%, 57.14% { opacity: 1 } 58.04%, 100% { opacity: 0 } }
+  .w25 { opacity: 0; animation: kw25 28.0s ease-in-out infinite; }
+  @keyframes kw26 { 0%, 57.14% { opacity: 0 } 58.04%, 59.11% { opacity: 1 } 60.01%, 100% { opacity: 0 } }
+  .w26 { opacity: 0; animation: kw26 28.0s ease-in-out infinite; }
+  @keyframes kw27 { 0%, 59.11% { opacity: 0 } 60.01%, 61.07% { opacity: 1 } 61.97%, 100% { opacity: 0 } }
+  .w27 { opacity: 0; animation: kw27 28.0s ease-in-out infinite; }
+  @keyframes kw28 { 0%, 61.07% { opacity: 0 } 61.97%, 63.04% { opacity: 1 } 63.94%, 100% { opacity: 0 } }
+  .w28 { opacity: 0; animation: kw28 28.0s ease-in-out infinite; }
+  @keyframes kw29 { 0%, 57.14% { opacity: 0 } 58.04%, 63.57% { opacity: 1 } 64.47%, 100% { opacity: 0 } }
+  .w29 { opacity: 0; animation: kw29 28.0s ease-in-out infinite; }
+  @keyframes kw30 { 0%, 63.57% { opacity: 0 } 64.47%, 69.29% { opacity: 1 } 70.19%, 100% { opacity: 0 } }
+  .w30 { opacity: 0; animation: kw30 28.0s ease-in-out infinite; }
+  @keyframes kw31 { 0%, 69.29% { opacity: 0 } 70.19%, 76.43% { opacity: 1 } 77.33%, 100% { opacity: 0 } }
+  .w31 { opacity: 0; animation: kw31 28.0s ease-in-out infinite; }
+  @keyframes kw32 { 0%, 76.43% { opacity: 0 } 77.33%, 83.57% { opacity: 1 } 84.47%, 100% { opacity: 0 } }
+  .w32 { opacity: 0; animation: kw32 28.0s ease-in-out infinite; }
+  @keyframes ka33 { 0%, 83.57% { opacity: 0 } 84.77%, 95% { opacity: 1 } 99%, 100% { opacity: 0 } }
+  .a33 { opacity: 0; animation: ka33 28.0s ease-in-out infinite; }
+</style>
+<rect class="bg" x="1" y="1" width="938" height="448" rx="14"/>
+<text class="title" x="36" y="42">Solving it, one worker at a time</text>
+<text class="sub muted" x="36" y="66">Shortest augmenting paths with prices: <tspan font-style="italic">u</tspan> for every worker, <tspan font-style="italic">v</tspan> for every task. An edge is tight when cost − <tspan font-style="italic">u</tspan> − <tspan font-style="italic">v</tspan> = 0.</text>
+<text class="hdr" x="232.0" y="124">task 0</text>
+<text class="hdr" x="326.0" y="124">task 1</text>
+<text class="hdr" x="420.0" y="124">task 2</text>
+<text class="rowhdr" x="116" y="201.0">worker 0</text>
+<text class="rowhdr" x="116" y="265.0">worker 1</text>
+<text class="rowhdr" x="116" y="329.0">worker 2</text>
+<rect class="cell" x="190" y="168" width="84" height="56" rx="8"/>
+<text class="num" x="232.0" y="196.0">1</text>
+<rect class="cell" x="284" y="168" width="84" height="56" rx="8"/>
+<text class="num" x="326.0" y="196.0">5</text>
+<rect class="cell" x="378" y="168" width="84" height="56" rx="8"/>
+<text class="num" x="420.0" y="196.0">9</text>
+<rect class="cell" x="190" y="232" width="84" height="56" rx="8"/>
+<text class="num" x="232.0" y="260.0">2</text>
+<rect class="cell" x="284" y="232" width="84" height="56" rx="8"/>
+<text class="num" x="326.0" y="260.0">7</text>
+<rect class="cell" x="378" y="232" width="84" height="56" rx="8"/>
+<text class="num" x="420.0" y="260.0">9</text>
+<rect class="cell" x="190" y="296" width="84" height="56" rx="8"/>
+<text class="num" x="232.0" y="324.0">8</text>
+<rect class="cell" x="284" y="296" width="84" height="56" rx="8"/>
+<text class="num" x="326.0" y="324.0">3</text>
+<rect class="cell" x="378" y="296" width="84" height="56" rx="8"/>
+<text class="num" x="420.0" y="324.0">4</text>
+<text class="var w0" x="232.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₀ = 0</text>
+<text class="var w1" x="232.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₀ = −4</text>
+<text class="var a2" x="232.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₀ = −5</text>
+<text class="var w3" x="326.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₁ = 0</text>
+<text class="var a2" x="326.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₁ = −1</text>
+<text class="var " x="420.0" y="146" fill="#58C4DD" style="fill:#58C4DD">v₂ = 0</text>
+<text class="var w4" x="162" y="197.0" fill="#F0AC5F" style="fill:#F0AC5F">u₀ = 0</text>
+<text class="var w5" x="162" y="197.0" fill="#F0AC5F" style="fill:#F0AC5F">u₀ = 1</text>
+<text class="var w1" x="162" y="197.0" fill="#F0AC5F" style="fill:#F0AC5F">u₀ = 5</text>
+<text class="var a2" x="162" y="197.0" fill="#F0AC5F" style="fill:#F0AC5F">u₀ = 6</text>
+<text class="var w0" x="162" y="261.0" fill="#F0AC5F" style="fill:#F0AC5F">u₁ = 0</text>
+<text class="var w1" x="162" y="261.0" fill="#F0AC5F" style="fill:#F0AC5F">u₁ = 6</text>
+<text class="var a2" x="162" y="261.0" fill="#F0AC5F" style="fill:#F0AC5F">u₁ = 7</text>
+<text class="var w3" x="162" y="325.0" fill="#F0AC5F" style="fill:#F0AC5F">u₂ = 0</text>
+<text class="var a2" x="162" y="325.0" fill="#F0AC5F" style="fill:#F0AC5F">u₂ = 4</text>
+<g class="w6"><text class="capb" x="580" y="150" style="fill:#9aa0aa">The setup</text><text class="cap" x="580" y="184">Every worker and every task starts</text><text class="cap" x="580" y="210">with price 0. We add the workers one</text><text class="cap" x="580" y="236">at a time, and keep a matching that</text><text class="cap" x="580" y="262">is cheapest for those added so far.</text></g>
+<rect class="w7" x="187" y="165" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w8" x="281" y="165" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w9" x="375" y="165" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<g class="w10"><text class="capb" x="580" y="150" style="fill:#F7D96F">Worker 0 reads its row</text><text class="cap" x="580" y="184">It looks at every cost in its row,</text><text class="cap" x="580" y="210">left to right.</text></g>
+<rect class="w11" x="187" y="165" width="90" height="62" rx="10" fill="none" stroke="#5CD0B3" stroke-width="3.5"/>
+<g class="w12"><text class="capb" x="580" y="150" style="fill:#5CD0B3">…and picks the cheapest</text><text class="cap" x="580" y="184">The cheapest is 1, at task 0.</text></g>
+<g class="w13"><text class="capb" x="580" y="150" style="fill:#F0AC5F">Raise its price</text><text class="cap" x="580" y="184">Setting <tspan font-style="italic">u</tspan>₀ = 1 makes the edge tight:</text><text class="cap" x="580" y="210">cost − u − v = 1 − 1 − 0 = 0.</text></g>
+<g class="w14"><rect x="190" y="168" width="84" height="56" rx="8" fill="#1d2d19" stroke="#83C167" stroke-width="2.5"/><text class="num" x="224.0" y="196.0" style="font-weight:700">1</text></g>
+<g class="w14" transform="translate(250,176)" fill="none" stroke="#83C167" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#83C167" stroke="none"/></g>
+<g class="w15"><text class="capb" x="580" y="150" style="fill:#83C167">Task 0 is free: lock it</text><text class="cap" x="580" y="184">Worker 0 takes task 0, for now.</text></g>
+<rect class="w16" x="187" y="229" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w17" x="281" y="229" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w18" x="375" y="229" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<g class="w19"><text class="capb" x="580" y="150" style="fill:#F7D96F">Worker 1 reads its row</text><text class="cap" x="580" y="184">Costs 2, 7 and 9.</text></g>
+<rect class="w20" x="187" y="229" width="90" height="62" rx="10" fill="none" stroke="#5CD0B3" stroke-width="3.5"/>
+<g class="w20"><rect x="190" y="168" width="84" height="56" rx="8" fill="#33171a" stroke="#FC6255" stroke-width="2.5"/><text class="num" x="224.0" y="196.0" style="font-weight:700">1</text></g>
+<g class="w20" transform="translate(250,176)" fill="none" stroke="#FC6255" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#FC6255" stroke="none"/></g>
+<g class="w20"><text class="capb" x="580" y="150" style="fill:#FC6255">The cheapest is already locked</text><text class="cap" x="580" y="184">Task 0 costs 2 for worker 1, but</text><text class="cap" x="580" y="210">worker 0 holds it. Could worker 0</text><text class="cap" x="580" y="236">move somewhere else?</text></g>
+<line class="w21" x1="232.0" y1="238.0" x2="232.0" y2="222.0" stroke="#58C4DD" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+<line class="w21" x1="254.0" y1="196.0" x2="300.0" y2="196.0" stroke="#58C4DD" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+<rect class="w21" x="281" y="165" width="90" height="62" rx="10" fill="none" stroke="#58C4DD" stroke-width="3" stroke-dasharray="6 4"/>
+<g class="w22"><text class="capb" x="580" y="150" style="fill:#58C4DD">Try the move</text><text class="cap" x="580" y="184">Worker 1 takes task 0 (2) and worker 0</text><text class="cap" x="580" y="210">moves to its next best, task 1 (5):</text><text class="cap" x="580" y="236">2 + 5 = 7, better than 7 + 1 = 8.</text></g>
+<g class="w23"><text class="capb" x="580" y="150" style="fill:#F0AC5F">Raise prices along the path</text><text class="cap" x="580" y="184"><tspan font-style="italic">u</tspan>₀, <tspan font-style="italic">u</tspan>₁ go up, <tspan font-style="italic">v</tspan>₀ goes down,</text><text class="cap" x="580" y="210">until the edge worker 0 – task 1</text><text class="cap" x="580" y="236">becomes tight.</text></g>
+<g class="a24"><rect x="284" y="168" width="84" height="56" rx="8" fill="#1d2d19" stroke="#83C167" stroke-width="2.5"/><text class="num" x="318.0" y="196.0" style="font-weight:700">5</text></g>
+<g class="a24" transform="translate(344,176)" fill="none" stroke="#83C167" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#83C167" stroke="none"/></g>
+<g class="a24"><rect x="190" y="232" width="84" height="56" rx="8" fill="#1d2d19" stroke="#83C167" stroke-width="2.5"/><text class="num" x="224.0" y="260.0" style="font-weight:700">2</text></g>
+<g class="a24" transform="translate(250,240)" fill="none" stroke="#83C167" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#83C167" stroke="none"/></g>
+<g class="w25"><text class="capb" x="580" y="150" style="fill:#83C167">Task 1 is free: flip and lock</text><text class="cap" x="580" y="184">Worker 0 → task 1, worker 1 → task 0.</text><text class="cap" x="580" y="210">The earlier choice was revised.</text></g>
+<rect class="w26" x="187" y="293" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w27" x="281" y="293" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<rect class="w28" x="375" y="293" width="90" height="62" rx="10" fill="none" stroke="#F7D96F" stroke-width="3"/>
+<g class="w29"><text class="capb" x="580" y="150" style="fill:#F7D96F">Worker 2 reads its row</text><text class="cap" x="580" y="184">Costs 8, 3 and 4.</text></g>
+<rect class="w30" x="281" y="293" width="90" height="62" rx="10" fill="none" stroke="#5CD0B3" stroke-width="3.5"/>
+<g class="w30"><rect x="284" y="168" width="84" height="56" rx="8" fill="#33171a" stroke="#FC6255" stroke-width="2.5"/><text class="num" x="318.0" y="196.0" style="font-weight:700">5</text></g>
+<g class="w30" transform="translate(344,176)" fill="none" stroke="#FC6255" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#FC6255" stroke="none"/></g>
+<g class="w30"><text class="capb" x="580" y="150" style="fill:#FC6255">The cheapest is locked again</text><text class="cap" x="580" y="184">Task 1 costs 3 for worker 2, but</text><text class="cap" x="580" y="210">worker 0 holds it.</text></g>
+<line class="w31" x1="326.0" y1="302.0" x2="326.0" y2="222.0" stroke="#58C4DD" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+<line class="w31" x1="304.0" y1="196.0" x2="258.0" y2="196.0" stroke="#58C4DD" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+<line class="w31" x1="232.0" y1="218.0" x2="232.0" y2="234.0" stroke="#58C4DD" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+<g class="w31"><text class="capb" x="580" y="150" style="fill:#58C4DD">Search along tight edges</text><text class="cap" x="580" y="184">The search follows the locked workers,</text><text class="cap" x="580" y="210">raising prices, until it reaches a task</text><text class="cap" x="580" y="236">nobody holds: task 2, at cost 4.</text></g>
+<g class="a2"><rect x="378" y="296" width="84" height="56" rx="8" fill="#1d2d19" stroke="#83C167" stroke-width="2.5"/><text class="num" x="412.0" y="324.0" style="font-weight:700">4</text></g>
+<g class="a2" transform="translate(438,304)" fill="none" stroke="#83C167" stroke-width="1.8"><path d="M3 7 V5 a4 4 0 0 1 8 0 V7"/><rect x="0.9" y="7" width="12.2" height="9" rx="2" fill="#83C167" stroke="none"/></g>
+<g class="w32"><text class="capb" x="580" y="150" style="fill:#83C167">Task 2 is free: lock it</text><text class="cap" x="580" y="184">Worker 2 takes task 2. Nobody else</text><text class="cap" x="580" y="210">had to move this time.</text></g>
+<g class="a33"><text class="capb" x="580" y="150" style="fill:#83C167">Done, and provably optimal</text><text class="cap" x="580" y="184">Total cost 5 + 2 + 4 = 11. The prices give a</text><text class="cap" x="580" y="210">certificate: Σ u + Σ v = 17 − 6 = 11,</text><text class="cap" x="580" y="236">so no matching can be cheaper.</text></g>
+<rect x="36" y="412" width="14" height="14" rx="3" fill="none" stroke="#F7D96F" stroke-width="2.5"/>
+<text class="sub muted" x="58" y="424">reading</text>
+<rect x="142" y="412" width="14" height="14" rx="3" fill="none" stroke="#5CD0B3" stroke-width="2.5"/>
+<text class="sub muted" x="164" y="424">cheapest pick</text>
+<rect x="296" y="412" width="14" height="14" rx="3" fill="none" stroke="#FC6255" stroke-width="2.5"/>
+<text class="sub muted" x="318" y="424">already locked</text>
+<rect x="458" y="412" width="14" height="14" rx="3" fill="none" stroke="#58C4DD" stroke-width="2.5"/>
+<text class="sub muted" x="480" y="424">path being tried</text>
+<rect x="636" y="412" width="14" height="14" rx="3" fill="none" stroke="#83C167" stroke-width="2.5"/>
+<text class="sub muted" x="658" y="424">locked</text>
+</svg>
