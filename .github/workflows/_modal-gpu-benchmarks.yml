@@ -27,7 +27,7 @@ on:
         type: string
         default: "all"
       benchmark_args:
-        description: "Extra benchmark arguments, such as --process-rounds 1"
+        description: "Extra benchmark arguments, such as --process-rounds 1, or --cold-cache populated to time a first call whose Triton kernels are already compiled on disk"
         required: false
         type: string
         default: ""
