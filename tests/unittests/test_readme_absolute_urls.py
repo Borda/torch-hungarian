@@ -63,20 +63,47 @@ class TestAbsolutize:
             rewriter.absolutize("![x](docs/assets/gone.svg)", "org/repo", "abc123", checkout)
 
 
+@pytest.fixture
+def readme_mirror(rewriter: ModuleType, tmp_path: Path) -> tuple[str, Path]:
+    """Return the real README text and a root holding an empty file for each relative path it names.
+
+    The rewrite is checked against the real README text, not against whichever files the test host ships:
+    the Modal GPU image leaves out `.modal`, so a link into it would fail there for a reason unrelated to the rewrite.
+    """
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    for html_target, markdown_target in re.findall(r'(?:src|href)="([^"]+)"|\]\(([^)\s]+)\)', text):
+        target = html_target or markdown_target
+        if rewriter.is_relative(target):
+            stub = tmp_path / target.removeprefix("./").split("#", 1)[0].split("?", 1)[0]
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            stub.touch()
+    return text, tmp_path
+
+
 class TestRepositoryReadme:
-    def test_no_relative_path_survives(self, rewriter: ModuleType) -> None:
-        """Every relative image and link in the real README is rewritten, and each path exists."""
+    @pytest.mark.skipif(
+        not (REPO_ROOT / ".modal").is_dir(), reason="a stripped copy of the checkout, such as the Modal GPU image"
+    )
+    def test_every_relative_path_exists(self, rewriter: ModuleType) -> None:
+        """Every relative image and link in the real README names a file in the checkout."""
         text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        rewritten, replaced = rewriter.absolutize(text, "Borda/torch-hungarian", "abc123", REPO_ROOT)
+        assert rewriter.absolutize(text, "Borda/torch-hungarian", "abc123", REPO_ROOT)[1]
+
+    def test_no_relative_path_survives(self, rewriter: ModuleType, readme_mirror: tuple[str, Path]) -> None:
+        """Every relative image and link in the real README is rewritten."""
+        text, root = readme_mirror
+        rewritten, replaced = rewriter.absolutize(text, "Borda/torch-hungarian", "abc123", root)
         remaining = [t for t in re.findall(r'(?:src|href)="([^"]+)"', rewritten) if rewriter.is_relative(t)]
         assert remaining == []
         assert replaced
 
     @pytest.mark.parametrize("name", ["linear-assignment", "hungarian-steps", "cpu-vs-triton", "backend-selection"])
-    def test_illustrations_resolve_to_the_commit(self, rewriter: ModuleType, name: str) -> None:
+    def test_illustrations_resolve_to_the_commit(
+        self, rewriter: ModuleType, readme_mirror: tuple[str, Path], name: str
+    ) -> None:
         """Each README illustration is pinned to the built commit on raw.githubusercontent.com."""
-        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        rewritten, _ = rewriter.absolutize(text, "Borda/torch-hungarian", "abc123", REPO_ROOT)
+        text, root = readme_mirror
+        rewritten, _ = rewriter.absolutize(text, "Borda/torch-hungarian", "abc123", root)
         url = f"https://raw.githubusercontent.com/Borda/torch-hungarian/abc123/docs/assets/{name}.svg"
         assert f'src="{url}"' in rewritten
 
