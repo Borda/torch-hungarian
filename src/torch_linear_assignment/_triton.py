@@ -53,8 +53,9 @@ ValidationMode = Literal["full", "off", "nonfinite_only", "infeasibility_flag_on
 _VALIDATION_MODES: frozenset[str] = frozenset({"full", "off", "nonfinite_only", "infeasibility_flag_only"})
 
 
-# Runtime matrix dimensions remove row and column counts as separate specialization keys.
-@triton.jit(do_not_specialize=["NUM_ROWS", "NUM_COLUMNS"])
+# EXPERIMENT: row and column counts are compile-time constants again, to measure what runtime dimensions cost.
+# This recompiles for every distinct shape.
+@triton.jit
 def _linear_assignment_kernel(
     cost,
     u,
@@ -63,8 +64,8 @@ def _linear_assignment_kernel(
     row4col,
     infeasible,
     rowmin,
-    NUM_ROWS,
-    NUM_COLUMNS,
+    NUM_ROWS: tl.constexpr,
+    NUM_COLUMNS: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP64: tl.constexpr,
 ):
