@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 548" width="900" height="548" role="img" aria-labelledby="t d">
+<title id="t">How a call picks its backend</title>
+<desc id="d">Flowchart: CPU and non-CUDA devices use SciPy on the host; supported CUDA devices use the Triton kernel unless the batch is tiny.</desc>
+<defs>
+<marker id="head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9 z" fill="#9aa0aa"/></marker>
+<style>
+  .bg { fill: #101216; stroke: #2b2f36; stroke-width: 1.5; }
+  text { font-family: "STIX Two Text", "Latin Modern Roman", Cambria, Georgia, "Times New Roman", serif; fill: #ece6e2; }
+  .t { font-size: 15.5px; text-anchor: middle; }
+  .tb { font-size: 17px; font-weight: 600; text-anchor: middle; }
+  .s { font-size: 14px; text-anchor: middle; fill: #c9ced6; }
+  .lab { font-size: 14px; font-style: italic; text-anchor: middle; fill: #F7D96F; }
+  .title { font-size: 21px; font-weight: 600; }
+  .decide { fill: #181b20; stroke: #58C4DD; stroke-width: 1.8; }
+  .start { fill: #181b20; stroke: #9aa0aa; stroke-width: 1.5; }
+  .host { fill: #181b20; stroke: #F0AC5F; stroke-width: 1.8; }
+  .gpu { fill: #16261c; stroke: #83C167; stroke-width: 2.4; }
+  .arrow { stroke: #9aa0aa; stroke-width: 1.8; fill: none; marker-end: url(#head); }
+  .key { font-size: 13px; fill: #9aa0aa; }
+</style>
+</defs>
+<rect class="bg" x="1" y="1" width="898" height="546" rx="18"/>
+<text class="title" x="30" y="40">How a call picks its backend</text>
+<rect class="start" x="500.0" y="26.0" width="280" height="40" rx="12"/>
+<text class="tb" x="640" y="46.0" dominant-baseline="central">cost tensor <tspan font-style="italic">(B, W, T)</tspan></text>
+<path class="arrow" d="M640 66 V120"/>
+<rect class="decide" x="540.0" y="120.0" width="200" height="44" rx="12"/>
+<text class="tb" x="640" y="142.0" dominant-baseline="central">which device?</text>
+<path class="arrow" d="M640 164 V214"/>
+<text class="lab" x="668" y="194">CUDA</text>
+<rect class="decide" x="460.0" y="219.0" width="360" height="66" rx="12"/>
+<text class="t" x="640" y="242.0" dominant-baseline="central">Linux, NVIDIA sm_80 or newer,</text>
+<text class="t" x="640" y="262.0" dominant-baseline="central">Torch 2.4 or newer, Triton available?</text>
+<path class="arrow" d="M640 285 V328"/>
+<text class="lab" x="662" y="313">yes</text>
+<rect class="decide" x="460.0" y="332.0" width="360" height="92" rx="12"/>
+<text class="tb" x="640" y="358.0" dominant-baseline="central">tiny batch?</text>
+<text class="s" x="640" y="378.0" dominant-baseline="central">B = 1, or B = 2 and max(W, T) ≤ 64,</text>
+<text class="s" x="640" y="398.0" dominant-baseline="central">or B ≤ 4 and max(W, T) ≤ 32</text>
+<path class="arrow" d="M640 424 V466"/>
+<text class="lab" x="660" y="450">no</text>
+<rect class="gpu" x="460.0" y="468.0" width="360" height="52" rx="12"/>
+<text class="tb" x="640" y="494.0" dominant-baseline="central">Triton kernel on the GPU</text>
+<path class="arrow" d="M540 142 H438.0 V92 H310"/>
+<text class="lab" x="376.0" y="86">CPU</text>
+<path class="arrow" d="M438.0 142 V166 H310"/>
+<text class="lab" x="376.0" y="160">MPS, XPU, other</text>
+<rect class="host" x="40.0" y="67.0" width="270" height="50" rx="12"/>
+<text class="t" x="175.0" y="82.0" dominant-baseline="central">SciPy on the CPU</text>
+<text class="s" x="175.0" y="102.0" dominant-baseline="central">the reference path</text>
+<rect class="host" x="40.0" y="138.0" width="270" height="56" rx="12"/>
+<text class="t" x="175.0" y="156.0" dominant-baseline="central">SciPy on the host,</text>
+<text class="s" x="175.0" y="176.0" dominant-baseline="central">result returned on the input device</text>
+<path class="arrow" d="M460.0 252 H310"/>
+<text class="lab" x="385.0" y="244">no</text>
+<rect class="host" x="40.0" y="219.0" width="270" height="66" rx="12"/>
+<text class="t" x="175.0" y="242.0" dominant-baseline="central">warn once, SciPy on the host,</text>
+<text class="s" x="175.0" y="262.0" dominant-baseline="central">result returned on the input device</text>
+<path class="arrow" d="M460.0 378 H310"/>
+<text class="lab" x="385.0" y="370">yes</text>
+<rect class="host" x="40.0" y="353.0" width="270" height="50" rx="12"/>
+<text class="t" x="175.0" y="368.0" dominant-baseline="central">SciPy on the host,</text>
+<text class="s" x="175.0" y="388.0" dominant-baseline="central">no warning</text>
+<rect class="host" x="40" y="478" width="16" height="12" rx="3"/>
+<text class="key" x="64" y="488">SciPy path</text>
+<rect class="gpu" x="150" y="478" width="16" height="12" rx="3"/>
+<text class="key" x="174" y="488">Triton path</text>
+<rect class="decide" x="262" y="478" width="16" height="12" rx="3"/>
+<text class="key" x="286" y="488">check</text>
+</svg>
