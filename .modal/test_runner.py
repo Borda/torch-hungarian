@@ -343,9 +343,9 @@ def run_benchmark(preset: str, benchmark_args: str = "", git_revision: str = "")
     output = Path(REMOTE_PROJECT_DIR) / BENCHMARK_OUTPUT_DIR / f"benchmark-{preset}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
     extra_args = shlex.split(benchmark_args)
-    allowed = {"--process-rounds", "--warmup", "--repetitions", "--worker-timeout-seconds"}
+    allowed = {"--process-rounds", "--warmup", "--repetitions", "--worker-timeout-seconds", "--cold-cache"}
     if any(arg.split("=", 1)[0] not in allowed for arg in extra_args if arg.startswith("--")):
-        raise ValueError("benchmark arguments may only tune rounds, warmup, repetitions, and timeout")
+        raise ValueError("benchmark arguments may only tune rounds, warmup, repetitions, timeout, and cold-cache state")
     output.unlink(missing_ok=True)
     command = [
         sys.executable,

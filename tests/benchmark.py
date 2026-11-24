@@ -153,6 +153,13 @@ def _arguments() -> argparse.Namespace:
         help="maximum fresh-worker runtime in seconds; default accommodates cold GPU compilation",
     )
     parser.add_argument(
+        "--cold-cache",
+        choices=("empty", "populated"),
+        default="empty",
+        help="Triton cache state of each fresh worker: empty includes kernel compilation; populated first compiles"
+        " in a discarded priming worker, so the measured fresh process finds the kernels on disk",
+    )
+    parser.add_argument(
         "--backend-order",
         choices=("alternate", "forward", "reverse"),
         default="alternate",
@@ -690,16 +697,23 @@ def _format_table(records: list[dict[str, Any]]) -> str:
         "warm p95 ms",
         "solver median ms",
         "cold ms",
+        "Triton cache",
         "CPU/GPU warm",
         "exact parity",
         "rounds",
     ]
+    cache_labels = {
+        "empty_unique_triton_cache": "empty",
+        "populated_triton_cache": "populated",
+        "not_applicable": "n/a",
+    }
     rows = []
     for record in records:
         shape = record.get("shape", {})
         warm = record.get("timing", {}).get("warm_ms", {})
         kernel = record.get("timing", {}).get("kernel_ms", {})
         cold = record.get("timing", {}).get("cold_first_call_ms")
+        cache_policy = record.get("cold_compilation", {}).get("cache_policy")
         speedup = record.get("speedup_vs_scipy_cpu", {}).get("warm_median")
         parity = record.get("parity", {}).get("exact")
         rows.append(
@@ -715,6 +729,7 @@ def _format_table(records: list[dict[str, Any]]) -> str:
                 f"{warm['p95']:.1f}" if "p95" in warm else "-",
                 f"{kernel['median']:.2f}" if "median" in kernel else "-",
                 f"{cold:.1f}" if cold is not None else "-",
+                cache_labels.get(cache_policy, "-"),
                 f"{speedup:.1f}x" if speedup is not None else "-",
                 "yes" if parity is True else "no" if parity is False else "-",
                 str(record.get("process_rounds", "-")),
@@ -774,6 +789,7 @@ def _summarize_case_rounds(group: list[dict[str, Any]]) -> dict[str, Any]:
         "input_dtype",
         "shape",
         "seed",
+        "cold_compilation",
     )
     return {
         **{name: group[0][name] for name in identity if name in group[0]},
@@ -975,7 +991,11 @@ def _attach_process_statistics(records: list[dict[str, Any]], required_rounds: i
             "p95_ms": _nearest_rank_p95(cold_samples),
             "quantile": "nearest_rank",
             "fresh_process": isolated,
-            "cache_policy": ("empty_unique_triton_cache" if implementation == "triton" else "not_applicable"),
+            "cache_policy": (
+                group[0].get("cold_compilation", {}).get("cache_policy") or "empty_unique_triton_cache"
+                if implementation == "triton"
+                else "not_applicable"
+            ),
         }
         for record in group:
             record["process_statistics"] = process_statistics
@@ -1326,25 +1346,68 @@ def _worker_case_record(specification: dict[str, Any]) -> dict[str, Any]:
         return _case_status_record(specification, "oom", str(error))
 
 
+def _read_worker_record(completed: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
+    """Decode the last case record only after a successful worker exit."""
+    if completed.returncode != 0:
+        return None
+    for line in reversed(completed.stdout.splitlines()):
+        if line.startswith(_WORKER_RECORD_PREFIX):
+            try:
+                record = json.loads(line.removeprefix(_WORKER_RECORD_PREFIX))
+            except json.JSONDecodeError:
+                return None
+            if isinstance(record, dict) and isinstance(record.get("status"), str) and record["status"]:
+                return record
+            return None
+    return None
+
+
 def _isolated_case_record(specification: dict[str, Any]) -> dict[str, Any]:
     """Run one backend/case in a fresh interpreter and recover its JSON record."""
     worker_timeout_seconds = specification.get("worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS)
+    populated = specification.get("cold_cache", "empty") == "populated"
     worker_specification = {
-        **{key: value for key, value in specification.items() if key != "worker_timeout_seconds"},
+        **{key: value for key, value in specification.items() if key not in {"worker_timeout_seconds", "cold_cache"}},
         "process_isolated": True,
-        "cold_cache_policy": "empty_unique_triton_cache",
+        "cold_cache_policy": "populated_triton_cache" if populated else "empty_unique_triton_cache",
     }
+    command = [sys.executable, str(Path(__file__).resolve()), "--worker-case", json.dumps(worker_specification)]
+    worker_phase = "measurement"
     try:
         with tempfile.TemporaryDirectory(prefix="tla-triton-cache-") as cache_directory:
             environment = os.environ.copy()
             environment["TRITON_CACHE_DIR"] = cache_directory
+            if populated and specification["backend"] != "scipy":
+                # The CLI can exit normally after writing a failed case, so check the record before measuring.
+                worker_phase = "priming"
+                priming = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    env=environment,
+                    text=True,
+                    timeout=worker_timeout_seconds,
+                )
+                priming_record = _read_worker_record(priming)
+                if priming_record is None or priming_record["status"] != "measured":
+                    if priming_record is not None:
+                        status = priming_record["status"]
+                        detail = f"priming worker reported {status}: {priming_record.get('detail') or status}"
+                    else:
+                        detail = priming.stderr.strip() or priming.stdout.strip()
+                        outcome = f"exited {priming.returncode}" if priming.returncode else "returned no valid record"
+                        detail = f"priming worker {outcome}: {detail}" if detail else f"priming worker {outcome}"
+                    record = _case_status_record(specification, "worker_failed", detail[-4000:])
+                    record["worker_phase"] = worker_phase
+                    if priming_record is not None:
+                        record["priming_status"] = priming_record["status"]
+                        record.update(
+                            (key, priming_record[key]) for key in ("parity", "diagnostics") if key in priming_record
+                        )
+                    return record
+            worker_phase = "measurement"
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--worker-case",
-                    json.dumps(worker_specification),
-                ],
+                command,
                 capture_output=True,
                 check=False,
                 env=environment,
@@ -1358,13 +1421,12 @@ def _isolated_case_record(specification: dict[str, Any]) -> dict[str, Any]:
             f"worker exceeded configured {worker_timeout_seconds:g}-second timeout",
         )
         record["worker_timeout_seconds"] = worker_timeout_seconds
+        if worker_phase == "priming":
+            record["worker_phase"] = worker_phase
         return record
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or f"worker exited {completed.returncode}"
-        return _case_status_record(specification, "worker_failed", detail[-4000:])
-    for line in reversed(completed.stdout.splitlines()):
-        if line.startswith(_WORKER_RECORD_PREFIX):
-            return json.loads(line.removeprefix(_WORKER_RECORD_PREFIX))
+    record = _read_worker_record(completed)
+    if record is not None:
+        return record
     detail = completed.stderr.strip() or completed.stdout.strip() or f"worker exited {completed.returncode}"
     return _case_status_record(specification, "worker_failed", detail[-4000:])
 
@@ -1513,6 +1575,7 @@ def main() -> None:
             "cold_samples_required": arguments.process_rounds,
             "run_metadata": run_metadata,
             "worker_timeout_seconds": getattr(arguments, "worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS),
+            "cold_cache": getattr(arguments, "cold_cache", "empty"),
         }
         record = _isolated_case_record(specification)
         records.append(record)
