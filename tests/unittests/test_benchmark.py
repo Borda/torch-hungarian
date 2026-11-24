@@ -1022,6 +1022,78 @@ def test_isolated_case_uses_a_unique_triton_cache_and_records_policy(
     assert Path(str(observed["cache_dir"])).exists() is False
 
 
+@pytest.mark.parametrize(
+    ("backend", "expected_workers"),
+    [("triton", 2), ("scipy", 1)],
+)
+def test_populated_cold_cache_primes_triton_workers_in_one_directory(
+    monkeypatch: pytest.MonkeyPatch, backend: str, expected_workers: int
+) -> None:
+    """Measure a fresh process that finds compiled kernels on disk, and prime only Triton workers."""
+    commands: list[list[str]] = []
+    cache_dirs: set[str] = set()
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        """Record each worker launch and the cache directory it shares."""
+        commands.append(command)
+        cache_dirs.add(kwargs["env"]["TRITON_CACHE_DIR"])  # type: ignore[index]
+        return SimpleNamespace(returncode=0, stdout='__TLA_BENCHMARK_RECORD__={"status": "measured"}\n', stderr="")
+
+    monkeypatch.setattr(benchmark.subprocess, "run", run)
+    specification = {
+        "backend": backend,
+        "validation": "full",
+        "batch": 1,
+        "workers": 2,
+        "tasks": 2,
+        "dtype_name": "float32",
+        "seed": 320,
+        "warmup": 0,
+        "repetitions": 1,
+        "cold_cache": "populated",
+    }
+
+    record = benchmark._isolated_case_record(specification)
+
+    assert record == {"status": "measured"}
+    assert len(commands) == expected_workers
+    assert len(cache_dirs) == 1
+    worker = json.loads(commands[-1][commands[-1].index("--worker-case") + 1])
+    assert worker["cold_cache_policy"] == "populated_triton_cache"
+    assert "cold_cache" not in worker
+
+
+def test_populated_cold_cache_stops_when_the_priming_worker_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never label a cold-compile run as cached when the priming worker did not finish."""
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        """Fail the first (priming) launch."""
+        calls.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="priming exploded")
+
+    monkeypatch.setattr(benchmark.subprocess, "run", run)
+    specification = {
+        "run_id": "test-run",
+        "backend": "triton",
+        "validation": "full",
+        "batch": 1,
+        "workers": 2,
+        "tasks": 2,
+        "dtype_name": "float32",
+        "seed": 320,
+        "warmup": 0,
+        "repetitions": 1,
+        "cold_cache": "populated",
+    }
+
+    record = benchmark._isolated_case_record(specification)
+
+    assert len(calls) == 1
+    assert record["status"] == "worker_failed"
+    assert "priming exploded" in str(record)
+
+
 def test_isolated_case_rejects_measured_payload_from_failed_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

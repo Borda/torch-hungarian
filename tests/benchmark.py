@@ -153,6 +153,13 @@ def _arguments() -> argparse.Namespace:
         help="maximum fresh-worker runtime in seconds; default accommodates cold GPU compilation",
     )
     parser.add_argument(
+        "--cold-cache",
+        choices=("empty", "populated"),
+        default="empty",
+        help="Triton cache state of each fresh worker: empty includes kernel compilation; populated first compiles"
+        " in a discarded priming worker, so the measured fresh process finds the kernels on disk",
+    )
+    parser.add_argument(
         "--backend-order",
         choices=("alternate", "forward", "reverse"),
         default="alternate",
@@ -1329,22 +1336,37 @@ def _worker_case_record(specification: dict[str, Any]) -> dict[str, Any]:
 def _isolated_case_record(specification: dict[str, Any]) -> dict[str, Any]:
     """Run one backend/case in a fresh interpreter and recover its JSON record."""
     worker_timeout_seconds = specification.get("worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS)
+    populated = specification.get("cold_cache", "empty") == "populated"
     worker_specification = {
-        **{key: value for key, value in specification.items() if key != "worker_timeout_seconds"},
+        **{key: value for key, value in specification.items() if key not in {"worker_timeout_seconds", "cold_cache"}},
         "process_isolated": True,
-        "cold_cache_policy": "empty_unique_triton_cache",
+        "cold_cache_policy": "populated_triton_cache" if populated else "empty_unique_triton_cache",
     }
+    command = [sys.executable, str(Path(__file__).resolve()), "--worker-case", json.dumps(worker_specification)]
     try:
         with tempfile.TemporaryDirectory(prefix="tla-triton-cache-") as cache_directory:
             environment = os.environ.copy()
             environment["TRITON_CACHE_DIR"] = cache_directory
+            if populated and specification["backend"] != "scipy":
+                # A first worker compiles into the cache directory and its record is discarded; the measured
+                # worker below is a new process that finds the compiled kernels on disk.
+                priming = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    env=environment,
+                    text=True,
+                    timeout=worker_timeout_seconds,
+                )
+                if priming.returncode != 0:
+                    detail = (
+                        priming.stderr.strip()
+                        or priming.stdout.strip()
+                        or f"priming worker exited {priming.returncode}"
+                    )
+                    return _case_status_record(specification, "worker_failed", detail[-4000:])
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--worker-case",
-                    json.dumps(worker_specification),
-                ],
+                command,
                 capture_output=True,
                 check=False,
                 env=environment,
@@ -1513,6 +1535,7 @@ def main() -> None:
             "cold_samples_required": arguments.process_rounds,
             "run_metadata": run_metadata,
             "worker_timeout_seconds": getattr(arguments, "worker_timeout_seconds", _DEFAULT_WORKER_TIMEOUT_SECONDS),
+            "cold_cache": getattr(arguments, "cold_cache", "empty"),
         }
         record = _isolated_case_record(specification)
         records.append(record)
