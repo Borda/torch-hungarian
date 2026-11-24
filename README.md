@@ -16,11 +16,11 @@
 
 |                              |                                                                                                                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **What it solves**           | For each cost matrix in a batch of shape `(B, W, T)`, assign every worker to at most one task and every task to at most one worker so that the total cost is minimal.             |
+| **What it solves**           | For each cost matrix in a batch of shape `(B, W, T)`, find `min(W, T)` one-to-one worker–task pairs with the lowest total cost.                                                   |
 | **Where it runs**            | CPU through SciPy (the reference path); Linux NVIDIA GPUs with compute capability 8.0 or newer through a lazily compiled Triton kernel; any other device through a host fallback. |
 | **Same answer as SciPy**     | Assignments match `scipy.optimize.linear_sum_assignment` exactly on the benchmarked workloads.                                                                                    |
 | **Output**                   | `torch.long` tensors on the input's device: a `(B, W)` assignment with `-1` for an unmatched worker, or SciPy-style `(row_ind, col_ind)` index pairs.                             |
-| **Built for training loops** | No host reads with `validate="off"`, so the call can be captured in a CUDA graph. Costs may require gradients; the autograd graph is left intact.                                 |
+| **Built for training loops** | After warm-up, `batch_linear_assignment_indices(..., validate="off")` supports CUDA graph capture for inputs routed to Triton. The cost can require gradients.                    |
 | **Install**                  | `pip install torch-hungarian`, imported as `torch_linear_assignment`. Pure source: no CUDA compilation.                                                                           |
 
 ## Install
@@ -176,25 +176,26 @@ Cost tensors have shape `(B, W, T)`: `B` independent problems, `W` workers (rows
 
 `validate` accepts `"full"` (default) and `"off"`, described under [Index pairs and validation modes](#index-pairs-and-validation-modes). `torch_linear_assignment.__version__` holds the installed version.
 
-Errors, on every backend:
+Validation errors depend on the call path. Shape, dtype and validation mode errors apply everywhere. Numeric and infeasibility errors apply to checked Triton calls and SciPy-backed calls.
 
-| Condition                                                                    | Raised                                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Complex cost dtype, including empty batches                                  | `TypeError("Complex costs are not supported.")`         |
-| Cost with the wrong rank                                                     | `ValueError`                                            |
-| `NaN` or `-inf` entries                                                      | `ValueError("matrix contains invalid numeric entries")` |
-| No feasible matching, for example `+inf` edges that leave a worker unmatched | `ValueError("cost matrix is infeasible")`               |
-| Unknown `validate` value                                                     | `ValueError`                                            |
+| Condition                                               | Raised                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------- |
+| Complex cost dtype, including empty batches             | `TypeError("Complex costs are not supported.")`         |
+| Cost with the wrong rank                                | `ValueError`                                            |
+| `NaN` or `-inf` entries                                 | `ValueError("matrix contains invalid numeric entries")` |
+| Forbidden edges prevent a matching of `min(W, T)` pairs | `ValueError("cost matrix is infeasible")`               |
+| Unknown `validate` value                                | `ValueError`                                            |
 
 ## Backends and support
 
 The public API is `batch_linear_assignment(cost)` and `batch_linear_assignment_indices(cost)` with cost shape `(B, W, T)`. Assignments have shape `(B, W)`, use `torch.long`, and contain `-1` for an unmatched worker.
 
-| Input and runtime                                                                                                                                         | Backend and behavior                                                               |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| CPU input on any supported OS                                                                                                                             | SciPy on CPU. This remains the reference path.                                     |
-| Linux NVIDIA GPU with compute capability 8.0 or newer, Torch >= 2.4, and Triton available                                                                 | Lazy Triton CUDA backend. The first call can include Triton compilation.           |
-| CUDA input on an unsupported OS; non-NVIDIA Linux accelerator; NVIDIA GPU below compute capability 8.0 (including T4); or missing/ineligible Triton/Torch | Warn once, solve with SciPy on CPU, and return the assignment on the input device. |
+| Input and runtime                                                                                 | Backend and behavior                                                                                   |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| CPU input on any supported OS                                                                     | SciPy on CPU. This remains the reference path.                                                         |
+| Linux NVIDIA GPU with compute capability 8.0 or newer, Torch >= 2.4, and Triton available         | Lazy Triton CUDA backend. The first call can include Triton compilation.                               |
+| CUDA input on an unsupported OS or GPU (including T4), or with missing/ineligible Triton or Torch | Warn once, solve with SciPy on CPU, and return the assignment on the input device.                     |
+| MPS, XPU or other non-CUDA accelerator input                                                      | Solve with SciPy on CPU and return the assignment on the input device without a CUDA fallback warning. |
 
 A CUDA input on a supported GPU is still solved on the host, without the fallback warning, when the batch is too small to pay for a launch: one problem, two problems with `max(W, T) <= 64`, or up to four problems with `max(W, T) <= 32`. SciPy wins there even after the transfers, and the result returns on the input's device either way. Call the private Triton backend directly if you need the kernel at those sizes.
 
@@ -202,11 +203,11 @@ The solver promotes `float16`, `bfloat16`, and integer costs to `float32`; `floa
 
 Costs may require gradients; solving leaves their autograd graph intact and returns non-differentiable integer assignments. Complex costs raise `TypeError("Complex costs are not supported.")` on every backend, including empty batches.
 
-Non-finite costs follow the SciPy contract. `NaN` and `-inf` raise `ValueError("matrix contains invalid numeric entries")`. `+inf` represents a forbidden edge when a perfect matching still exists; if the matrix is infeasible, the call raises `ValueError("cost matrix is infeasible")` instead of terminating the process with a device assertion.
+For checked Triton calls and SciPy-backed calls, `NaN` and `-inf` raise `ValueError("matrix contains invalid numeric entries")`. `+inf` represents a forbidden edge. If there is no feasible matching of `min(W, T)` pairs, the call raises `ValueError("cost matrix is infeasible")`. The unchecked Triton indices path skips these numeric and feasibility checks.
 
 ### Practical notes
 
-- **The first call compiles.** On the Triton path the first call for a shape can include kernel compilation (about 0.8 to 2.3 s measured on H100, A100 and L4 for the three README shapes; see [One-time compilation cost](#one-time-compilation-cost)). The kernels are cached on disk, so a later process finds them and its first call takes about 0.4 s on the L4 and H100 and about 1.0 s on the A100. Matrix dimensions are passed to the kernel at runtime, so shapes in the same power-of-two column bucket share one binary for a fixed GPU, dtype, pointer alignment and warp count. Run one call per shape class at start-up, outside timed or latency-sensitive code.
+- **The first call can compile.** A fresh process may compile the kernel on its first call. With a populated disk cache, the measured private adapter first call took about 0.4 s on the L4 and H100 and about 1.0 s on the A100. See [Cache-state first-call comparison](#cache-state-first-call-comparison) for the timing scope. Matrix dimensions are passed to the kernel at runtime, so shapes in the same power-of-two column bucket share one binary for a fixed GPU, dtype, pointer alignment and warp count. Run one call per shape class at start-up, outside timed or latency-sensitive code.
 - **Several GPUs.** A cost on any CUDA device is solved on that device, with no `torch.cuda.device(...)` context needed and non-default streams supported. A two-device acceptance test runs in CI.
 - **Ties.** When several assignments have the same total cost, the one returned can differ from SciPy's. Compare objective values, not indices, on tied costs.
 - **Large batches.** Per-batch offsets use 64-bit arithmetic, so a large batch no longer wraps its addresses at 2^31 elements.
@@ -219,35 +220,37 @@ All numbers below are batch-208 `float32` problems on real GPUs and every assign
 
 ### Current measurements
 
-Median of five fresh-process rounds with full validation (`validation=full`), measured through Modal with the `readme` benchmark preset. Every case runs in its own process. The table shows the numbers a user sees once the compiled Triton kernels are on disk, which is every run after the first on a machine, two rows per GPU:
+The `readme` preset ran through Modal with full validation (`validation=full`) and five fresh-process rounds. The GPU columns report the private Triton adapter lane (`triton/full`). The harness measures public API latency separately in `public_cuda/triton`.
 
-- **`first, cached`** is the first call of a fresh process whose Triton cache already holds the compiled kernels (a throwaway process compiles into the cache first, then the measured process starts fresh). It includes loading the kernels from disk and the first launch, so Triton is slower than SciPy on the smallest shape and about even on the larger ones (ratios near `1.0x`).
+- **`first, cached`** is the first call of a fresh process whose Triton cache already holds the compiled kernels (a throwaway process compiles into the cache first, then the measured process starts fresh). It includes loading the kernels from disk and the first launch. The private adapter is slower than SciPy for every transpose and direct case. For the square case it is faster on L4 and H100 and slower on A100.
 - **`warm`** is the median of the timed repetitions after warm-up, the number that matters in a loop. It comes from the same run as the `first, cached` row of that GPU, so SciPy and Triton ran on the same host.
 
-| GPU / timing         | SciPy CPU (ms)       | Triton (ms)              | SciPy / Triton         |
-| -------------------- | -------------------- | ------------------------ | ---------------------- |
-| L4 (first, cached)   | 48.6 / 556.0 / 294.5 | 412.1 / 439.8 / 422.0    | 0.12x / 1.26x / 0.70x  |
-| L4 (warm)            | 46.6 / 552.3 / 292.3 | 1.1 / 8.2 / 4.8          | 42.1x / 67.6x / 60.7x  |
-| A100 (first, cached) | 59.4 / 631.6 / 345.9 | 1017.0 / 1018.3 / 1000.6 | 0.06x / 0.62x / 0.35x  |
-| A100 (warm)          | 58.2 / 630.5 / 343.6 | 1.7 / 11.6 / 3.4         | 33.4x / 54.1x / 100.1x |
-| H100 (first, cached) | 46.3 / 481.3 / 276.6 | 394.5 / 442.8 / 402.8    | 0.12x / 1.09x / 0.69x  |
-| H100 (warm)          | 45.2 / 481.4 / 275.3 | 0.9 / 5.7 / 2.2          | 48.3x / 84.6x / 123.4x |
+| GPU / timing         | SciPy CPU (ms)       | Private Triton adapter (ms) | SciPy / private Triton |
+| -------------------- | -------------------- | --------------------------- | ---------------------- |
+| L4 (first, cached)   | 48.6 / 556.0 / 294.5 | 412.1 / 439.8 / 422.0       | 0.12x / 1.26x / 0.70x  |
+| L4 (warm)            | 46.6 / 552.3 / 292.3 | 1.1 / 8.2 / 4.8             | 42.1x / 67.6x / 60.7x  |
+| A100 (first, cached) | 59.4 / 631.6 / 345.9 | 1017.0 / 1018.3 / 1000.6    | 0.06x / 0.62x / 0.35x  |
+| A100 (warm)          | 58.2 / 630.5 / 343.6 | 1.7 / 11.6 / 3.4            | 33.4x / 54.1x / 100.1x |
+| H100 (first, cached) | 46.3 / 481.3 / 276.6 | 394.5 / 442.8 / 402.8       | 0.12x / 1.09x / 0.69x  |
+| H100 (warm)          | 45.2 / 481.4 / 275.3 | 0.9 / 5.7 / 2.2             | 48.3x / 84.6x / 123.4x |
 
 Warm speedups over SciPy span `33.4x` to `123.4x` with exact assignment parity in every row. The three GPUs are an NVIDIA L4, an NVIDIA A100-SXM4-40GB and an NVIDIA H100 80GB HBM3. The runs are GitHub Actions runs `45364422739` (L4) and `45364474487` (A100) at commit `902c5fb`, and `45358451901` (H100) at commit `688b275`; those commits change only the benchmark script, its tests, the Modal runner and the documentation, not the solver. The records are source-bound JSONL. The aggregated H100 records still carry the label `empty_unique_triton_cache`, because that run predates the fix that keeps each worker's cache policy; its arguments and its much lower first-call times show the cache was populated.
 
-SciPy ran on the host CPU of the Modal machine, whose model the records do not capture and which differs between Modal GPU types and between runs, so compare the Triton columns across GPUs and the SciPy column only within one row. The benchmark lane never falls back to another GPU type, so each row is the GPU it names.
+For example, the H100 job reports public API cached first-call medians of `438.5 / 485.1 / 458.2` ms and warm medians of `1.0 / 5.7 / 2.3` ms. The A100 job reports public API cached first-call medians of `1087.8 / 1104.7 / 1094.1` ms and warm medians of `1.8 / 11.7 / 3.5` ms. Both jobs report exact parity for all three shapes across five rounds. [H100 benchmark job](https://github.com/Borda/torch-hungarian/actions/runs/45358451901/job/138322172605), [A100 benchmark job](https://github.com/Borda/torch-hungarian/actions/runs/45364474487/job/138342587165)
 
-#### One-time compilation cost
+SciPy ran on the Modal host CPU. The harness records its identity in `run_metadata.system.cpu_model` and may fall back to a generic processor or architecture value. Compare SciPy across runs only when their recorded CPU models match. The benchmark lane uses the requested GPU type for each row.
 
-The first call on a machine also compiles the kernel. The table shows the Triton first call in a fresh process with an empty Triton cache, the same call with the kernels already on disk (the `first, cached` row above), and their difference, which is the compilation cost, in milliseconds for `transpose / square / direct`.
+#### Cache-state first-call comparison
 
-| GPU  | First call, empty cache (ms) | First call, cached (ms)  | Compilation, the difference (ms) |
-| ---- | ---------------------------- | ------------------------ | -------------------------------- |
-| L4   | 2754.7 / 2499.4 / 2564.7     | 412.1 / 439.8 / 422.0    | 2343 / 2060 / 2143               |
-| A100 | 2154.2 / 1958.3 / 2023.4     | 1017.0 / 1018.3 / 1000.6 | 1137 / 940 / 1023                |
-| H100 | 1445.7 / 1214.6 / 1278.5     | 394.5 / 442.8 / 402.8    | 1051 / 772 / 876                 |
+The table compares first-call medians from separate fresh-process runs with empty and populated Triton caches. Each cell lists `transpose / square / direct` in milliseconds. The difference estimates the change in end-to-end first-call latency across the two cache states.
 
-The empty-cache column comes from GitHub Actions runs `45293277313` (L4), `45293358658` (A100) and `45293390707` (H100) at commit `ed522be`, separate runs from the cached ones, so each difference mixes two runs and compile time also depends on the host CPU. Read it as the order of magnitude: about `2` s on the L4 and about `1` s on the A100 and H100, paid once per kernel and machine. The A100 first call stays near `1` s even with the cache populated, about two and a half times the L4 and H100 figures, and these records do not show why.
+| GPU  | First call, empty cache (ms) | First call, cached (ms)  | Empty minus populated (ms) |
+| ---- | ---------------------------- | ------------------------ | -------------------------- |
+| L4   | 2754.7 / 2499.4 / 2564.7     | 412.1 / 439.8 / 422.0    | 2343 / 2060 / 2143         |
+| A100 | 2154.2 / 1958.3 / 2023.4     | 1017.0 / 1018.3 / 1000.6 | 1137 / 940 / 1023          |
+| H100 | 1445.7 / 1214.6 / 1278.5     | 394.5 / 442.8 / 402.8    | 1051 / 772 / 876           |
+
+The empty-cache column comes from GitHub Actions runs `45293277313` (L4), `45293358658` (A100) and `45293390707` (H100) at commit `ed522be`, separate runs from the cached ones. Their differences include cache I/O, process and host differences, and any compilation work. The A100 first call stays near `1` s even with the cache populated, about two and a half times the L4 and H100 figures.
 
 ### Hardware coverage
 

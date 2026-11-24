@@ -267,6 +267,6 @@
 <g class="a19"><rect x="680" y="284" width="52" height="52" rx="7" fill="#1d2d19" stroke="#83C167" stroke-width="2.5"/><text x="706.0" y="311.0" class="num green" style="font-size:20px;font-weight:700">✓</text></g>
 <text class="cap w16" x="30" y="366">1. the batch stays on the GPU and one program starts for every problem</text>
 <text class="cap w20" x="30" y="366">2. all programs scan the columns of their own matrix at once: the <tspan class="blue">blue bar</tspan> is that scan</text>
-<text class="cap w21" x="30" y="366">3. all problems finish together, and nothing is copied to the host</text>
+<text class="cap w21" x="30" y="366">3. assignments stay on the GPU. Default validation reads back a status flag.</text>
 <text class="sub muted" x="30" y="398">Illustrative timing, not to scale: the measured speedups are in the benchmark tables below.</text>
 </svg>
