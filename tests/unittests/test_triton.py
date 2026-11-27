@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -734,6 +735,76 @@ def test_batch_linear_assignment_compiled_rejects_large_infeasible_augmenting_pa
 
     with torch.cuda.device(device), pytest.raises(ValueError, match="cost matrix is infeasible"):
         batch_linear_assignment(tall_cost)
+
+
+@pytest.mark.parametrize(
+    "solve",
+    [
+        pytest.param(batch_linear_assignment, id="assignment"),
+        pytest.param(batch_linear_assignment_indices, id="index-pairs"),
+    ],
+)
+@pytest.mark.parametrize(
+    "infeasible_slots",
+    [pytest.param((1,), id="interior"), pytest.param((4,), id="last"), pytest.param((1, 4), id="multiple")],
+)
+def test_public_assignment_rejects_infeasible_items_in_mixed_batch(
+    triton_backend_device: tuple[object, torch.device],
+    solve: Callable[[torch.Tensor], torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
+    infeasible_slots: tuple[int, ...],
+) -> None:
+    """Raise when selected batch items fail and solve the next feasible batch on the same stream."""
+    _, device = triton_backend_device
+    with torch.cuda.device(device):
+        feasible = -torch.eye(3, device=device).repeat(5, 1, 1)
+        mixed = feasible.clone()
+        mixed[list(infeasible_slots), 0, :] = torch.inf
+        with pytest.raises(ValueError, match="^cost matrix is infeasible$"):
+            solve(mixed)
+        assignment = batch_linear_assignment(feasible)
+        rows, cols = batch_linear_assignment_indices(feasible)
+    expected = torch.arange(3, device=device).expand(5, 3)
+    assert torch.equal(assignment, expected)
+    assert torch.equal(rows, expected)
+    assert torch.equal(cols, expected)
+
+
+def test_compiled_split_validation_checks_infeasibility_only_in_flag_mode(
+    triton_backend_device: tuple[object, torch.device],
+) -> None:
+    """Raise in flag-only mode and return correct matches for feasible items in nonfinite-only mode."""
+    backend, device = triton_backend_device
+    with torch.cuda.device(device):
+        cost = -torch.eye(3, device=device).repeat(5, 1, 1)
+        cost[-1, 0, :] = torch.inf
+        with pytest.raises(ValueError, match="^cost matrix is infeasible$"):
+            backend.batch_linear_assignment_indices(cost, validation="infeasibility_flag_only")
+        rows, cols = backend.batch_linear_assignment_indices(cost, validation="nonfinite_only")
+    expected = torch.arange(3, device=device).expand(4, 3)
+    assert torch.equal(rows[:-1], expected)
+    assert torch.equal(cols[:-1], expected)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [pytest.param((5, 4, 3), id="tall"), pytest.param((5, 3, 4), id="wide")],
+)
+def test_public_cuda_index_outputs_can_be_modified_independently_for_backward(
+    triton_backend_device: tuple[object, torch.device], shape: tuple[int, int, int]
+) -> None:
+    """Preserve gradients through a saved column index after independently editing the row output."""
+    _, device = triton_backend_device
+    cost = torch.rand(shape, generator=torch.Generator().manual_seed(21))
+    with torch.cuda.device(device):
+        rows, cols = batch_linear_assignment_indices(cost.to(device))
+        saved_cols = cols.clone()
+        scores = cost[:, : min(shape[1:]), :].to(device).requires_grad_()
+        gathered = scores.gather(2, cols.unsqueeze(-1))
+        rows.zero_()
+        gathered.sum().backward()
+        expected_grad = torch.zeros_like(scores).scatter_(2, saved_cols.unsqueeze(-1), 1)
+    assert torch.equal(cols, saved_cols)
+    assert torch.equal(scores.grad, expected_grad)
 
 
 def _scipy_indices(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

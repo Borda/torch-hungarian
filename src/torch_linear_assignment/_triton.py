@@ -32,9 +32,8 @@ Outputs:
 
 Failure:
     NaN and negative infinity are rejected by one host reduction before launch.
-    The kernel records one infeasibility flag per batch item instead of asserting
-    on device; the normal wrapper synchronizes once to turn any flag into an
-    exception. Triton import, compilation, and GPU execution failures are not
+    A failed GPU program atomically sets a batch-wide flag. The checked
+    wrapper reads the flag once and raises if any problem is infeasible. Triton import, compilation, and GPU execution failures are not
     swallowed because they do not mean the optional dependency is merely absent.
 
 Used by:
@@ -63,7 +62,8 @@ def _linear_assignment_kernel(
     row4col,
     infeasible,
     rowmin,
-    pairs,
+    pair_rows,
+    pair_columns,
     NUM_ROWS,
     NUM_COLUMNS,
     BLOCK_N: tl.constexpr,
@@ -74,9 +74,10 @@ def _linear_assignment_kernel(
     """Solve one rectangular assignment problem in a single Triton program.
 
     The program initializes its own potentials and assignments, so the host never fills them.
-    With ``WRITE_PAIRS`` it also writes its row-sorted ``(rows, cols)`` pairs as int64 into
-    ``pairs``, laid out as ``(2, batch, NUM_ROWS)``. ``TALL`` marks a solve whose rows are the
-    caller's tasks: the pairs are then the caller's workers in order, with each worker's task.
+    With ``WRITE_PAIRS`` it writes row-sorted int64 indices into two independent
+    buffers of shape ``(batch, NUM_ROWS)``. ``TALL`` marks a solve whose rows are
+    the caller's tasks, so the output lists matched workers in their original
+    order alongside their tasks.
     """
     # int64, so the per-batch offsets below stay exact once a batch holds more than 2**31 elements.
     batch_index = tl.program_id(0).to(tl.int64)
@@ -92,16 +93,17 @@ def _linear_assignment_kernel(
     rowmin = rowmin + batch_index * NUM_ROWS
 
     # Initialize this program's workspaces. The barrier after the pre-pass below orders these
-    # stores before the first search reads them; `infeasible` is the one buffer the host zeroes,
-    # because every program writes it.
+    # stores before the first search reads them. The host zeroes the shared infeasibility flag.
     tl.store(u + lane, 0.0, mask=row_mask)
     tl.store(v + lane, 0.0, mask=column_mask)
     tl.store(col4row + lane, -1, mask=row_mask)
     tl.store(row4col + lane, -1, mask=column_mask)
     if WRITE_PAIRS:
         # Pairs a failed solve leaves unwritten still index in range.
-        tl.store(pairs + batch_index * NUM_ROWS + lane, 0, mask=row_mask)
-        tl.store(pairs + (tl.num_programs(0) + batch_index) * NUM_ROWS + lane, 0, mask=row_mask)
+        pair_rows = pair_rows + batch_index * NUM_ROWS
+        pair_columns = pair_columns + batch_index * NUM_ROWS
+        tl.store(pair_rows + lane, 0, mask=row_mask)
+        tl.store(pair_columns + lane, 0, mask=row_mask)
 
     # Every solver row is assigned once. Sterbenz's lemma guarantees exact subtraction
     # when positive finite costs are within a factor of two of their row minimum.
@@ -119,6 +121,7 @@ def _linear_assignment_kernel(
     # The search below reads the minima written above.
     tl.debug_barrier()
 
+    failed = False
     for current_row in tl.range(0, NUM_ROWS, num_stages=1):
         scanned_rows = tl.zeros((BLOCK_N,), tl.int1)
         scanned_columns = tl.zeros((BLOCK_N,), tl.int1)
@@ -225,13 +228,10 @@ def _linear_assignment_kernel(
             active_columns = active_columns & ~((lane == selected_column) & step_valid)
             num_remaining = tl.where(step_valid, num_remaining - 1, num_remaining)
             min_value = tl.where(step_valid, lowest, min_value)
-            tl.store(infeasible, 1, mask=searching & ~has_candidate)
             searching = matched_step
 
         solved = sink != -1
-        # One flag for the whole batch: every program stores the same value, so no atomic is needed
-        # and the host reads a single element instead of reducing a per-problem array.
-        tl.store(infeasible, 1, mask=~solved)
+        failed = failed | ~solved
 
         tl.store(u + current_row, current_potential + min_value, mask=solved)
         visited_rows = scanned_rows
@@ -276,10 +276,11 @@ def _linear_assignment_kernel(
         # The next row consumes the assignments and potentials written above.
         tl.debug_barrier()
 
+    # Failed programs may share this address. The host reads it after the kernel finishes.
+    tl.atomic_or(infeasible, 1, mask=failed, sem="relaxed", scope="gpu")
+
     if WRITE_PAIRS:
         # The last iteration's barrier ordered every assignment store before these loads.
-        pair_rows = pairs + batch_index * NUM_ROWS
-        pair_columns = pairs + (tl.num_programs(0) + batch_index) * NUM_ROWS
         if TALL:
             # Solver columns are workers: keep the matched ones in order, each with its task. Every
             # task is matched in a feasible solve, so the count equals NUM_ROWS.
@@ -369,13 +370,13 @@ def _solve(
     cost: torch.Tensor,
     validation: ValidationMode,
     num_warps: int | None = None,
-    pairs: torch.Tensor | None = None,
+    pairs: tuple[torch.Tensor, torch.Tensor] | None = None,
     tall: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch the one-program-per-batch kernel and return both assignment views.
 
-    The forced-warp tests use ``num_warps`` to override the shape heuristic. ``pairs``, an int64
-    tensor of shape ``(2, batch, rows)``, makes the kernel also write its row-sorted pairs there;
+    The forced-warp tests use ``num_warps`` to override the shape heuristic. When
+    provided, ``pairs`` holds two int64 outputs of shape ``(batch, rows)``.
     ``tall`` says the solver rows are the caller's tasks.
     """
     batch_size, rows, columns = cost.shape
@@ -393,6 +394,8 @@ def _solve(
     u, v, rowmin = _sections(buffer[:float_bytes].view(cost.dtype), float_counts)
     col4row, row4col, infeasible = _sections(buffer[float_bytes:].view(torch.int32), int_counts)
     infeasible.zero_()
+    # The assignment-only specialization never dereferences these output pointer arguments.
+    pair_rows, pair_columns = (col4row, col4row) if pairs is None else pairs
 
     _linear_assignment_kernel[(batch_size,)](
         cost,
@@ -402,7 +405,8 @@ def _solve(
         row4col,
         infeasible,
         rowmin,
-        col4row if pairs is None else pairs,
+        pair_rows,
+        pair_columns,
         NUM_ROWS=rows,
         NUM_COLUMNS=columns,
         BLOCK_N=block_n,
@@ -432,7 +436,7 @@ def _prepare(cost: torch.Tensor, validation: ValidationMode) -> torch.Tensor:
 
 
 def _solve_oriented(
-    cost: torch.Tensor, validation: ValidationMode, pairs: torch.Tensor | None = None
+    cost: torch.Tensor, validation: ValidationMode, pairs: tuple[torch.Tensor, torch.Tensor] | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     """Solve with the smaller side as rows; return its row and column maps and whether the cost was tall.
 
@@ -478,6 +482,9 @@ def batch_linear_assignment_indices(
 
     # The kernel writes the row-sorted pairs itself: a tall cost lists its matched workers in order,
     # as SciPy does, and a wide one its rows with their columns, so no host-side sort or copy runs.
-    pairs = torch.empty((2, batch_size, min(workers, tasks)), dtype=torch.long, device=cost.device)
-    _solve_oriented(cost, validation, pairs=pairs)
-    return pairs[0], pairs[1]
+    # Independent version counters let callers edit one output while autograd saves the other.
+    shape = (batch_size, min(workers, tasks))
+    rows = torch.empty(shape, dtype=torch.long, device=cost.device)
+    cols = torch.empty_like(rows)
+    _solve_oriented(cost, validation, pairs=(rows, cols))
+    return rows, cols
