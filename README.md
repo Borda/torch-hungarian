@@ -212,7 +212,7 @@ For checked Triton calls and SciPy-backed calls, `NaN` and `-inf` raise `ValueEr
 - **Ties.** When several assignments have the same total cost, the one returned can differ from SciPy's. Compare objective values, not indices, on tied costs.
 - **Large batches.** Per-batch offsets use 64-bit arithmetic, so a large batch no longer wraps its addresses at 2^31 elements.
 - **Autograd.** The returned assignment is integer and not differentiable. If you need gradients, index the cost with the returned pairs: `cost.gather(2, ...)` or advanced indexing keeps the graph.
-- **Pinning inside another project.** Packages that depend on this one by an exact version (RF-DETR's `train` extra pins `torch-hungarian==0.1.0rc0`) do not receive newer releases until that pin is relaxed.
+- **Pinning inside another project.** A package that depends on this one by an exact version does not receive newer releases until that pin is relaxed. RF-DETR 1.12.0 and 1.12.1 pin `torch-hungarian==0.1.0rc0` in their `train` extra. RF-DETR's `develop` branch has depended on the upstream `torch-linear-assignment` distribution since its pull request 1736, and both distributions provide the import `torch_linear_assignment`, so an environment can hold only one of them.
 
 ## Performance
 
