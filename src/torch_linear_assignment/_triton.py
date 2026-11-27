@@ -408,7 +408,8 @@ def _solve(
         BLOCK_N=block_n,
         IS_FP64=cost.dtype == torch.float64,
         WRITE_PAIRS=pairs is not None,
-        TALL=tall,
+        # Only the pair output reads `TALL`; passing it otherwise would compile a second binary for tall costs.
+        TALL=tall and pairs is not None,
         num_warps=num_warps,
     )
     if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.item()):
