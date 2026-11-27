@@ -204,11 +204,13 @@ def _linear_assignment_kernel(
             active_columns = active_columns & ~((lane == selected_column) & step_valid)
             num_remaining = tl.where(step_valid, num_remaining - 1, num_remaining)
             min_value = tl.where(step_valid, lowest, min_value)
-            tl.store(infeasible + batch_index, 1, mask=searching & ~has_candidate)
+            tl.store(infeasible, 1, mask=searching & ~has_candidate)
             searching = matched_step
 
         solved = sink != -1
-        tl.store(infeasible + batch_index, 1, mask=~solved)
+        # One flag for the whole batch: every program stores the same value, so no atomic is needed
+        # and the host reads a single element instead of reducing a per-problem array.
+        tl.store(infeasible, 1, mask=~solved)
 
         tl.store(u + current_row, current_potential + min_value, mask=solved)
         visited_rows = scanned_rows
@@ -262,10 +264,13 @@ def _validate_mode(validation: ValidationMode) -> None:
 
 def _reject_invalid_numeric_entries(cost: torch.Tensor) -> None:
     """Raise the SciPy-compatible error for NaN or negative-infinite costs."""
-    if not cost.is_floating_point():
+    if not cost.is_floating_point() or cost.numel() == 0:
         return
-    invalid = torch.logical_or(torch.isnan(cost), torch.isneginf(cost)).any()
-    if bool(invalid.item()):
+    # One reduction instead of four elementwise passes: the minimum is NaN when any entry is NaN and
+    # -inf when any entry is -inf, and every other minimum is a valid cost. `not (x > -inf)` is true
+    # for both bad values and false for every finite or positive-infinite minimum.
+    lowest = cost.amin()
+    if not bool((lowest > -float("inf")).item()):
         raise ValueError("matrix contains invalid numeric entries")
 
 
@@ -335,7 +340,7 @@ def _solve(
     # Two allocations instead of five: one float block (potentials and row minima) and one int32
     # block (assignments and the infeasibility flags), sliced into the kernel's workspaces.
     float_counts = (batch_size * rows, batch_size * columns, batch_size * rows)
-    int_counts = (batch_size * rows, batch_size * columns, batch_size)
+    int_counts = (batch_size * rows, batch_size * columns, 1)
     floats = torch.zeros(_padded_total(float_counts), device=cost.device, dtype=cost.dtype)
     ints = torch.full((_padded_total(int_counts),), -1, device=cost.device, dtype=torch.int32)
     u, v, rowmin = _sections(floats, float_counts)
@@ -356,7 +361,7 @@ def _solve(
         IS_FP64=cost.dtype == torch.float64,
         num_warps=num_warps,
     )
-    if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.any().item()):
+    if validation in {"full", "infeasibility_flag_only"} and bool(infeasible.item()):
         raise ValueError("cost matrix is infeasible")
     return col4row.view(batch_size, rows), row4col.view(batch_size, columns)
 
